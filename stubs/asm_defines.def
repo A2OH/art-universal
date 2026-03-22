@@ -1,0 +1,2 @@
+// Empty asm_defines.def - normally build-generated with ASM_DEFINE() entries.
+// The static_assert checks in runtime.cc are skipped since we provide no entries.

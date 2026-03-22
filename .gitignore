@@ -1,0 +1,12 @@
+# Build output (large object files)
+build/
+build-ohos-arm64/
+
+# Don't track binary artifacts
+*.o
+*.a
+*.so
+*.oat
+*.art
+*.vdex
+*.dex
