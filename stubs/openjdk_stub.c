@@ -531,7 +531,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"nanoTime", "()J", (void*)System_nanoTime},
                 {"currentTimeMillis", "()J", (void*)System_currentTimeMillis},
             };
-            (*env)->RegisterNatives(env, cls, methods, 8);
+            registerNativesOrSkip(env, cls, methods, 8);
             (*env)->DeleteLocalRef(env, cls);
         }
     }
@@ -546,7 +546,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"getJvmVersionInfo", "()Z", (void*)Version_getJvmVersionInfo},
                 {"getJdkVersionInfo", "()V", (void*)Version_getJdkVersionInfo},
             };
-            (*env)->RegisterNatives(env, cls, methods, 4);
+            registerNativesOrSkip(env, cls, methods, 4);
             (*env)->DeleteLocalRef(env, cls);
         }
     }
@@ -559,7 +559,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"isSocket", "(I)Z", (void*)FileDescriptor_isSocket},
                 {"sync", "()V", (void*)FileDescriptor_sync},
             };
-            (*env)->RegisterNatives(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
         }
     }
@@ -569,7 +569,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         jclass cls = (*env)->FindClass(env, "sun/nio/ch/FileDispatcherImpl");
         if (cls) {
             JNINativeMethod methods[] = {
-                {"init", "()V", (void*)FileDispatcherImpl_init},
                 {"read0", "(Ljava/io/FileDescriptor;JI)I", (void*)FileDispatcherImpl_read0},
                 {"write0", "(Ljava/io/FileDescriptor;JI)I", (void*)FileDispatcherImpl_write0},
                 {"pread0", "(Ljava/io/FileDescriptor;JIJ)I", (void*)FileDispatcherImpl_pread0},
@@ -579,7 +578,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"force0", "(Ljava/io/FileDescriptor;Z)I", (void*)FileDispatcherImpl_force0},
                 {"truncate0", "(Ljava/io/FileDescriptor;J)I", (void*)FileDispatcherImpl_truncate0},
             };
-            (*env)->RegisterNatives(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
         }
     }
@@ -589,13 +588,12 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         jclass cls = (*env)->FindClass(env, "java/io/FileOutputStream");
         if (cls) {
             JNINativeMethod methods[] = {
-                {"initIDs", "()V", (void*)FileOutputStream_initIDs},
                 {"open0", "(Ljava/lang/String;Z)V", (void*)FileOutputStream_open0},
                 {"write", "(IZ)V", (void*)FileOutputStream_write},
                 {"writeBytes", "([BIIZ)V", (void*)FileOutputStream_writeBytes},
                 {"close0", "()V", (void*)FileOutputStream_close0},
             };
-            (*env)->RegisterNatives(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
         }
     }
@@ -605,7 +603,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         jclass cls = (*env)->FindClass(env, "java/io/FileInputStream");
         if (cls) {
             JNINativeMethod methods[] = {
-                {"initIDs", "()V", (void*)FileInputStream_initIDs},
                 {"open0", "(Ljava/lang/String;)V", (void*)FileInputStream_open0},
                 {"read0", "()I", (void*)FileInputStream_read0},
                 {"readBytes", "([BII)I", (void*)FileInputStream_readBytes},
@@ -613,7 +610,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"available0", "()I", (void*)FileInputStream_available0},
                 {"close0", "()V", (void*)FileInputStream_close0},
             };
-            (*env)->RegisterNatives(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
         }
     }
@@ -631,7 +628,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"maxMemory", "()J", (void*)Runtime_maxMemory},
                 {"runFinalization0", "()V", (void*)Runtime_runFinalization0},
             };
-            (*env)->RegisterNatives(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
         }
     }
@@ -641,7 +638,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         jclass cls = (*env)->FindClass(env, "java/io/UnixFileSystem");
         if (cls) {
             JNINativeMethod methods[] = {
-                {"initIDs", "()V", (void*)UnixFileSystem_initIDs},
                 {"getBooleanAttributes0", "(Ljava/lang/String;)I", (void*)UnixFileSystem_getBooleanAttributes0},
                 {"canonicalize0", "(Ljava/lang/String;)Ljava/lang/String;", (void*)UnixFileSystem_canonicalize0},
                 {"getLastModifiedTime0", "(Ljava/io/File;)J", (void*)UnixFileSystem_getLastModifiedTime0},
@@ -653,7 +649,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"setReadOnly0", "(Ljava/io/File;)Z", (void*)UnixFileSystem_setReadOnly0},
                 {"getSpace0", "(Ljava/io/File;I)J", (void*)UnixFileSystem_getSpace0},
             };
-            (*env)->RegisterNatives(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
         }
     }

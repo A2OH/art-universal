@@ -133,6 +133,7 @@ RUNTIME_SRCS_ALL = $(filter-out %_test.cc %_fuzzer.cc %_bench.cc,$(wildcard \
   $(ART)/runtime/arch/x86_64/*.cc \
   $(ART)/runtime/base/*.cc \
   $(ART)/runtime/entrypoints/*.cc \
+  $(ART)/runtime/entrypoints/jni/*.cc \
   $(ART)/runtime/entrypoints/quick/*.cc \
   $(ART)/runtime/gc/*.cc \
   $(ART)/runtime/gc/accounting/*.cc \
@@ -409,7 +410,7 @@ link-runtime: all ziparchive sigchain nativehelper dalvikvm-main
 	@echo "=== Linking dalvikvm (runtime only, no compiler) ==="
 	@mkdir -p $(BUILDDIR)/bin
 	$(HOSTLD) -o $(BUILDDIR)/bin/dalvikvm \
-	  -rdynamic -Wl,--unresolved-symbols=ignore-in-object-files \
+	  -Wl,--unresolved-symbols=ignore-in-object-files \
 	  $(BUILDDIR)/dalvikvm/dalvikvm.o \
 	  $$(find $(BUILDDIR)/nativehelper -name '*.o') \
 	  $$(find $(BUILDDIR)/runtime -name '*.o') \

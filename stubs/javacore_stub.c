@@ -603,7 +603,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
             {"unlink", "(Ljava/lang/String;)V", (void*)linux_unlink},
             {"chmod", "(Ljava/lang/String;I)V", (void*)linux_chmod},
             {"fchmod", "(Ljava/io/FileDescriptor;I)V", (void*)linux_fchmod},
-            {"umask", "(I)I", (void*)linux_umask},
+            {"umaskImpl", "(I)I", (void*)linux_umask},
             {"dup", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;", (void*)linux_dup},
             {"dup2", "(Ljava/io/FileDescriptor;I)Ljava/io/FileDescriptor;", (void*)linux_dup2},
             {"ftruncate", "(Ljava/io/FileDescriptor;J)V", (void*)linux_ftruncate},
@@ -614,7 +614,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
             {"realpath", "(Ljava/lang/String;)Ljava/lang/String;", (void*)linux_realpath},
             {"getxattr", "(Ljava/lang/String;Ljava/lang/String;)[B", (void*)linux_getxattr},
         };
-        (*env)->RegisterNatives(env, linuxClass, methods, sizeof(methods)/sizeof(methods[0]));
+        registerNativesOrSkip(env, linuxClass, methods, sizeof(methods)/sizeof(methods[0]));
         (*env)->DeleteLocalRef(env, linuxClass);
     }
 
@@ -625,7 +625,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
             JNINativeMethod methods[] = {
                 {"initConstants", "()V", (void*)OsConstants_initConstants},
             };
-            (*env)->RegisterNatives(env, cls, methods, 1);
+            registerNativesOrSkip(env, cls, methods, 1);
             (*env)->DeleteLocalRef(env, cls);
         }
     }

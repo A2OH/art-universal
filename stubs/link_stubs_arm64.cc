@@ -211,17 +211,6 @@ char artNterpAsmInstructionEnd[1] = {};
 // art_quick_invoke_stub_internal - ARM32 only, ARM64 uses art_quick_invoke_stub
 STUB_ENTRYPOINT(art_quick_invoke_stub_internal)
 
-// === JNI native method stubs ===
-const void* artFindNativeMethod(void*) {
-    fprintf(stderr, "STUB: artFindNativeMethod called\n");
-    return nullptr;
-}
-const void* artFindNativeMethodRunnable(void*) {
-    fprintf(stderr, "STUB: artFindNativeMethodRunnable called\n");
-    return nullptr;
-}
-size_t artCriticalNativeOutArgsSize(void*) { return 0; }
-
 }  // extern "C"
 
 // === C++ stubs ===

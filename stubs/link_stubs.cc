@@ -593,18 +593,12 @@ void DexCache::AtomicStoreRelease16B(
 
 extern "C" {
 
-// artFindNativeMethod/artFindNativeMethodRunnable - called from JNI stub
 // when a native method needs to be resolved. In dex2oat --compiler-filter=verify
 // mode, these should never be reached. If called, return null (will trigger exception).
-const void* artFindNativeMethod(void* /*self*/) {
-  fprintf(stderr, "STUB: artFindNativeMethod called (should not happen in dex2oat)\n");
   return nullptr;
 }
-const void* artFindNativeMethodRunnable(void* /*self*/) {
-  fprintf(stderr, "STUB: artFindNativeMethodRunnable called (should not happen in dex2oat)\n");
   return nullptr;
 }
-size_t artCriticalNativeOutArgsSize(void* /*method*/) {
   return 0;
 }
 
