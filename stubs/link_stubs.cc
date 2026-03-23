@@ -382,10 +382,12 @@ bool XzCompress(const ArrayRef<const unsigned char>&,
                 std::vector<unsigned char>*, int) {
   return false;  // compression not available
 }
+// By-value overload defined at file end (outside namespace)
 bool XzDecompress(const ArrayRef<const unsigned char>&,
                   std::vector<unsigned char>*) {
   return false;  // decompression not available
 }
+// By-value overload defined at file end (outside namespace)
 
 }  // namespace art
 
@@ -607,3 +609,16 @@ size_t artCriticalNativeOutArgsSize(void* /*method*/) {
 }
 
 }  // extern "C"
+
+// XzCompress/XzDecompress by-value overloads (for JIT compiler)
+// These use mangled names directly to avoid needing ArrayRef definition
+extern "C" {
+bool _ZN3art10XzCompressENS_8ArrayRefIKhEEPNSt3__16vectorIhNS3_9allocatorIhEEEEi(
+    void* arrayref, void* output, int level) {
+  return false;
+}
+bool _ZN3art12XzDecompressENS_8ArrayRefIKhEEPNSt3__16vectorIhNS3_9allocatorIhEEEE(
+    void* arrayref, void* output) {
+  return false;
+}
+}

@@ -409,7 +409,7 @@ link-runtime: all ziparchive sigchain nativehelper dalvikvm-main
 	@echo "=== Linking dalvikvm (runtime only, no compiler) ==="
 	@mkdir -p $(BUILDDIR)/bin
 	$(HOSTLD) -o $(BUILDDIR)/bin/dalvikvm \
-	  -Wl,--unresolved-symbols=ignore-in-object-files \
+	  -rdynamic -Wl,--unresolved-symbols=ignore-in-object-files \
 	  $(BUILDDIR)/dalvikvm/dalvikvm.o \
 	  $$(find $(BUILDDIR)/nativehelper -name '*.o') \
 	  $$(find $(BUILDDIR)/runtime -name '*.o') \
