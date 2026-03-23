@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <string.h>
 #include <stdlib.h>
+#include <dlfcn.h>
 #include <time.h>
 #include <unistd.h>
 #include <limits.h>
@@ -10,6 +11,20 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+
+/* Register native methods one at a time, skipping failures */
+static int registerNativesOrSkip(JNIEnv* env, jclass clazz,
+                                  const JNINativeMethod* methods, int numMethods) {
+    int registered = 0;
+    for (int i = 0; i < numMethods; i++) {
+        if ((*env)->RegisterNatives(env, clazz, &methods[i], 1) == 0) {
+            registered++;
+        } else {
+            (*env)->ExceptionClear(env);
+        }
+    }
+    return registered;
+}
 
 /* ==================== java.lang.System natives ==================== */
 
@@ -474,6 +489,10 @@ static jboolean UnixFileSystem_setReadOnly0(JNIEnv* env, jobject thiz, jobject f
     return JNI_FALSE; /* stub */
 }
 
+static jstring UnixFileSystem_parentOrNull(JNIEnv* env, jobject thiz, jstring jpath) {
+    return NULL; /* ART will use Java fallback */
+}
+
 static jlong UnixFileSystem_getSpace0(JNIEnv* env, jobject thiz, jobject file, jint t) {
     return 0; /* stub */
 }
@@ -490,8 +509,31 @@ static void Runtime_nativeGc(JNIEnv* env, jobject thiz) {
 
 static jstring Runtime_nativeLoad(JNIEnv* env, jclass clazz, jstring filename,
                                    jobject classLoader, jclass caller) {
-    /* Return null = success, non-null = error message */
-    return NULL;
+    /* Actually load the native library via dlopen + call JNI_OnLoad */
+    if (!filename) return (*env)->NewStringUTF(env, "null filename");
+    const char* path = (*env)->GetStringUTFChars(env, filename, NULL);
+    void* handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle) {
+        const char* err = dlerror();
+        jstring result = (*env)->NewStringUTF(env, err ? err : "dlopen failed");
+        (*env)->ReleaseStringUTFChars(env, filename, path);
+        return result;
+    }
+    /* Call JNI_OnLoad if present */
+    typedef jint (*JNI_OnLoad_fn)(JavaVM*, void*);
+    JNI_OnLoad_fn onLoad = (JNI_OnLoad_fn)dlsym(handle, "JNI_OnLoad");
+    if (onLoad) {
+        JavaVM* vm;
+        (*env)->GetJavaVM(env, &vm);
+        jint ver = onLoad(vm, NULL);
+        if (ver < 0) {
+            dlclose(handle);
+            (*env)->ReleaseStringUTFChars(env, filename, path);
+            return (*env)->NewStringUTF(env, "JNI_OnLoad returned error");
+        }
+    }
+    (*env)->ReleaseStringUTFChars(env, filename, path);
+    return NULL; /* null = success */
 }
 
 static jlong Runtime_freeMemory(JNIEnv* env, jobject thiz) {
@@ -512,7 +554,253 @@ static void Runtime_runFinalization0(JNIEnv* env, jclass clazz) {
 }
 
 /* ==================== JNI_OnLoad ==================== */
+#include <jni.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <stdint.h>
 
+/* Minimal ZIP reading for java.util.zip.ZipFile */
+/* We implement the subset ART's classloader needs */
+
+/* ZIP file handle - just stores the fd and mmap */
+typedef struct {
+    int fd;
+    uint8_t *data;
+    size_t size;
+    /* Central directory */
+    uint8_t *cd_start;
+    uint32_t cd_entries;
+} NativeZipFile;
+
+/* Find EOCD (End of Central Directory) */
+static uint8_t* find_eocd(uint8_t* data, size_t size) {
+    if (size < 22) return NULL;
+    /* Search backwards from end */
+    for (size_t i = size - 22; i > 0 && i > size - 65557; i--) {
+        if (data[i] == 0x50 && data[i+1] == 0x4b && data[i+2] == 0x05 && data[i+3] == 0x06)
+            return &data[i];
+    }
+    return NULL;
+}
+
+/* open(String name, int mode, long lastModified, boolean usemmap) -> long */
+static jlong ZipFile_open(JNIEnv* env, jclass cls, jstring jname, jint mode, jlong lastMod, jboolean usemmap) {
+    if (!jname) return 0;
+    const char* name = (*env)->GetStringUTFChars(env, jname, NULL);
+    int fd = open(name, O_RDONLY);
+    (*env)->ReleaseStringUTFChars(env, jname, name);
+    if (fd < 0) return 0;
+    
+    struct stat st;
+    if (fstat(fd, &st) < 0) { close(fd); return 0; }
+    
+    uint8_t* data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) { close(fd); return 0; }
+    
+    NativeZipFile* zf = calloc(1, sizeof(NativeZipFile));
+    zf->fd = fd;
+    zf->data = data;
+    zf->size = st.st_size;
+    
+    /* Parse EOCD */
+    uint8_t* eocd = find_eocd(data, st.st_size);
+    if (eocd) {
+        zf->cd_entries = eocd[8] | (eocd[9] << 8);
+        uint32_t cd_offset = eocd[16] | (eocd[17] << 8) | (eocd[18] << 16) | (eocd[19] << 24);
+        if (cd_offset < st.st_size) zf->cd_start = data + cd_offset;
+    }
+    
+    return (jlong)(uintptr_t)zf;
+}
+
+/* close(long jzfile) */
+static void ZipFile_close(JNIEnv* env, jclass cls, jlong handle) {
+    NativeZipFile* zf = (NativeZipFile*)(uintptr_t)handle;
+    if (!zf) return;
+    if (zf->data) munmap(zf->data, zf->size);
+    if (zf->fd >= 0) close(zf->fd);
+    free(zf);
+}
+
+/* getTotal(long jzfile) -> int */
+static jint ZipFile_getTotal(JNIEnv* env, jclass cls, jlong handle) {
+    NativeZipFile* zf = (NativeZipFile*)(uintptr_t)handle;
+    return zf ? (jint)zf->cd_entries : 0;
+}
+
+/* getEntry(long jzfile, byte[] name, boolean addSlash) -> long */
+static jlong ZipFile_getEntry(JNIEnv* env, jclass cls, jlong handle, jbyteArray jname, jboolean addSlash) {
+    NativeZipFile* zf = (NativeZipFile*)(uintptr_t)handle;
+    if (!zf || !zf->cd_start || !jname) return 0;
+    
+    jsize nameLen = (*env)->GetArrayLength(env, jname);
+    jbyte* nameBytes = (*env)->GetByteArrayElements(env, jname, NULL);
+    
+    /* Search central directory for matching entry */
+    uint8_t* p = zf->cd_start;
+    uint8_t* end = zf->data + zf->size;
+    for (uint32_t i = 0; i < zf->cd_entries && p + 46 <= end; i++) {
+        if (p[0] != 0x50 || p[1] != 0x4b || p[2] != 0x01 || p[3] != 0x02) break;
+        uint16_t fnLen = p[28] | (p[29] << 8);
+        uint16_t extraLen = p[30] | (p[31] << 8);
+        uint16_t commentLen = p[32] | (p[33] << 8);
+        
+        if (fnLen == nameLen && p + 46 + fnLen <= end &&
+            memcmp(p + 46, nameBytes, nameLen) == 0) {
+            (*env)->ReleaseByteArrayElements(env, jname, nameBytes, JNI_ABORT);
+            return (jlong)(uintptr_t)p; /* return pointer to CD entry as handle */
+        }
+        p += 46 + fnLen + extraLen + commentLen;
+    }
+    (*env)->ReleaseByteArrayElements(env, jname, nameBytes, JNI_ABORT);
+    return 0;
+}
+
+/* getEntryBytes(long jzentry, int type) -> byte[] */
+static jbyteArray ZipFile_getEntryBytes(JNIEnv* env, jclass cls, jlong entry, jint type) {
+    uint8_t* p = (uint8_t*)(uintptr_t)entry;
+    if (!p) return NULL;
+    /* type: 0=name, 1=extra, 2=comment */
+    uint16_t fnLen = p[28] | (p[29] << 8);
+    if (type == 0) {
+        jbyteArray result = (*env)->NewByteArray(env, fnLen);
+        (*env)->SetByteArrayRegion(env, result, 0, fnLen, (jbyte*)(p + 46));
+        return result;
+    }
+    return NULL;
+}
+
+/* getEntrySize(long jzentry) -> long (uncompressed size) */
+static jlong ZipFile_getEntrySize(JNIEnv* env, jclass cls, jlong entry) {
+    uint8_t* p = (uint8_t*)(uintptr_t)entry;
+    if (!p) return -1;
+    return p[24] | (p[25] << 8) | (p[26] << 16) | (p[27] << 24);
+}
+
+/* getEntryCSize(long jzentry) -> long (compressed size) */
+static jlong ZipFile_getEntryCSize(JNIEnv* env, jclass cls, jlong entry) {
+    uint8_t* p = (uint8_t*)(uintptr_t)entry;
+    if (!p) return -1;
+    return p[20] | (p[21] << 8) | (p[22] << 16) | (p[23] << 24);
+}
+
+/* getEntryMethod(long jzentry) -> int */
+static jint ZipFile_getEntryMethod(JNIEnv* env, jclass cls, jlong entry) {
+    uint8_t* p = (uint8_t*)(uintptr_t)entry;
+    if (!p) return 0;
+    return p[10] | (p[11] << 8);
+}
+
+/* getEntryTime(long jzentry) -> long */
+static jlong ZipFile_getEntryTime(JNIEnv* env, jclass cls, jlong entry) {
+    return 0; /* stub */
+}
+
+/* getEntryCrc(long jzentry) -> long */
+static jlong ZipFile_getEntryCrc(JNIEnv* env, jclass cls, jlong entry) {
+    uint8_t* p = (uint8_t*)(uintptr_t)entry;
+    if (!p) return 0;
+    return p[16] | (p[17] << 8) | (p[18] << 16) | (p[19] << 24);
+}
+
+/* getEntryFlag(long jzentry) -> int */
+static jint ZipFile_getEntryFlag(JNIEnv* env, jclass cls, jlong entry) {
+    uint8_t* p = (uint8_t*)(uintptr_t)entry;
+    if (!p) return 0;
+    return p[8] | (p[9] << 8);
+}
+
+/* getFileDescriptor(long jzfile) -> int */
+static jint ZipFile_getFileDescriptor(JNIEnv* env, jclass cls, jlong handle) {
+    NativeZipFile* zf = (NativeZipFile*)(uintptr_t)handle;
+    return zf ? zf->fd : -1;
+}
+
+/* getCommentBytes(long jzfile) -> byte[] */
+static jbyteArray ZipFile_getCommentBytes(JNIEnv* env, jclass cls, jlong handle) {
+    return NULL;
+}
+
+/* read(long jzfile, long jzentry, long pos, byte[] b, int off, int len) -> int */
+static jint ZipFile_read(JNIEnv* env, jclass cls, jlong handle, jlong entry, jlong pos,
+                          jbyteArray buf, jint off, jint len) {
+    NativeZipFile* zf = (NativeZipFile*)(uintptr_t)handle;
+    uint8_t* p = (uint8_t*)(uintptr_t)entry;
+    if (!zf || !p || !buf) return -1;
+    
+    /* Get local file header offset from CD entry */
+    uint32_t localOff = p[42] | (p[43] << 8) | (p[44] << 16) | (p[45] << 24);
+    if (localOff + 30 >= zf->size) return -1;
+    
+    /* Parse local file header */
+    uint8_t* lh = zf->data + localOff;
+    uint16_t lfnLen = lh[26] | (lh[27] << 8);
+    uint16_t lextraLen = lh[28] | (lh[29] << 8);
+    uint8_t* fileData = lh + 30 + lfnLen + lextraLen;
+    
+    uint32_t csize = p[20] | (p[21] << 8) | (p[22] << 16) | (p[23] << 24);
+    if (pos >= csize) return -1;
+    
+    jint toRead = len;
+    if (pos + toRead > csize) toRead = (jint)(csize - pos);
+    
+    (*env)->SetByteArrayRegion(env, buf, off, toRead, (jbyte*)(fileData + pos));
+    return toRead;
+}
+
+/* Stubs for less critical methods */
+static void ZipFile_ensureOpen(JNIEnv* env, jobject thiz) { }
+static jobject ZipFile_getInflater(JNIEnv* env, jobject thiz) { return NULL; }
+static void ZipFile_releaseInflater(JNIEnv* env, jobject thiz, jobject inflater) { }
+static jobject ZipFile_getZipEntry(JNIEnv* env, jobject thiz, jstring name, jlong entry) { return NULL; }
+
+/* startsWithLOC - check if ZIP starts with local file header */
+static jboolean ZipFile_startsWithLOC(JNIEnv* env, jclass cls, jlong handle) {
+    NativeZipFile* zf = (NativeZipFile*)(uintptr_t)handle;
+    if (!zf || zf->size < 4) return JNI_FALSE;
+    return (zf->data[0] == 0x50 && zf->data[1] == 0x4b &&
+            zf->data[2] == 0x03 && zf->data[3] == 0x04) ? JNI_TRUE : JNI_FALSE;
+}
+#include <math.h>
+
+/* java.lang.Math native methods */
+static jdouble Math_sin(JNIEnv* e, jclass c, jdouble a) { return sin(a); }
+static jdouble Math_cos(JNIEnv* e, jclass c, jdouble a) { return cos(a); }
+static jdouble Math_tan(JNIEnv* e, jclass c, jdouble a) { return tan(a); }
+static jdouble Math_asin(JNIEnv* e, jclass c, jdouble a) { return asin(a); }
+static jdouble Math_acos(JNIEnv* e, jclass c, jdouble a) { return acos(a); }
+static jdouble Math_atan(JNIEnv* e, jclass c, jdouble a) { return atan(a); }
+static jdouble Math_atan2(JNIEnv* e, jclass c, jdouble a, jdouble b) { return atan2(a, b); }
+static jdouble Math_exp(JNIEnv* e, jclass c, jdouble a) { return exp(a); }
+static jdouble Math_log(JNIEnv* e, jclass c, jdouble a) { return log(a); }
+static jdouble Math_log10(JNIEnv* e, jclass c, jdouble a) { return log10(a); }
+static jdouble Math_sqrt(JNIEnv* e, jclass c, jdouble a) { return sqrt(a); }
+static jdouble Math_cbrt(JNIEnv* e, jclass c, jdouble a) { return cbrt(a); }
+static jdouble Math_ceil(JNIEnv* e, jclass c, jdouble a) { return ceil(a); }
+static jdouble Math_floor(JNIEnv* e, jclass c, jdouble a) { return floor(a); }
+static jdouble Math_pow(JNIEnv* e, jclass c, jdouble a, jdouble b) { return pow(a, b); }
+static jdouble Math_sinh(JNIEnv* e, jclass c, jdouble a) { return sinh(a); }
+static jdouble Math_cosh(JNIEnv* e, jclass c, jdouble a) { return cosh(a); }
+static jdouble Math_tanh(JNIEnv* e, jclass c, jdouble a) { return tanh(a); }
+static jdouble Math_expm1(JNIEnv* e, jclass c, jdouble a) { return expm1(a); }
+static jdouble Math_log1p(JNIEnv* e, jclass c, jdouble a) { return log1p(a); }
+static jdouble Math_IEEEremainder(JNIEnv* e, jclass c, jdouble a, jdouble b) { return remainder(a, b); }
+static jdouble Math_hypot(JNIEnv* e, jclass c, jdouble a, jdouble b) { return hypot(a, b); }
+static jdouble Math_abs_d(JNIEnv* e, jclass c, jdouble a) { return fabs(a); }
+static jdouble Math_max_d(JNIEnv* e, jclass c, jdouble a, jdouble b) { return fmax(a, b); }
+static jdouble Math_min_d(JNIEnv* e, jclass c, jdouble a, jdouble b) { return fmin(a, b); }
+static jdouble Math_copySign_d(JNIEnv* e, jclass c, jdouble a, jdouble b) { return copysign(a, b); }
+static jdouble Math_toDegrees(JNIEnv* e, jclass c, jdouble a) { return a * (180.0 / 3.14159265358979323846); }
+static jdouble Math_toRadians(JNIEnv* e, jclass c, jdouble a) { return a * (3.14159265358979323846 / 180.0); }
+static jdouble Math_random(JNIEnv* e, jclass c) { return (double)rand() / RAND_MAX; }
+static jdouble Math_rint(JNIEnv* e, jclass c, jdouble a) { return rint(a); }
+static jint Math_round_f(JNIEnv* e, jclass c, jfloat a) { return (jint)roundf(a); }
+static jlong Math_round_d(JNIEnv* e, jclass c, jdouble a) { return (jlong)round(a); }
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return -1;
@@ -638,8 +926,11 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         jclass cls = (*env)->FindClass(env, "java/io/UnixFileSystem");
         if (cls) {
             JNINativeMethod methods[] = {
+                {"initIDs", "()V", (void*)UnixFileSystem_initIDs},
                 {"getBooleanAttributes0", "(Ljava/lang/String;)I", (void*)UnixFileSystem_getBooleanAttributes0},
                 {"canonicalize0", "(Ljava/lang/String;)Ljava/lang/String;", (void*)UnixFileSystem_canonicalize0},
+                {"canonicalize", "(Ljava/lang/String;)Ljava/lang/String;", (void*)UnixFileSystem_canonicalize0},
+                {"parentOrNull", "(Ljava/lang/String;)Ljava/lang/String;", (void*)UnixFileSystem_parentOrNull},
                 {"getLastModifiedTime0", "(Ljava/io/File;)J", (void*)UnixFileSystem_getLastModifiedTime0},
                 {"createFileExclusively0", "(Ljava/lang/String;)Z", (void*)UnixFileSystem_createFileExclusively0},
                 {"createDirectory0", "(Ljava/io/File;)Z", (void*)UnixFileSystem_createDirectory0},
@@ -654,5 +945,80 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         }
     }
 
+    /* java.util.zip.ZipFile */
+    {
+        jclass cls = (*env)->FindClass(env, "java/util/zip/ZipFile");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"open", "(Ljava/lang/String;IJZ)J", (void*)ZipFile_open},
+                {"close", "(J)V", (void*)ZipFile_close},
+                {"getTotal", "(J)I", (void*)ZipFile_getTotal},
+                {"getEntry", "(J[BZ)J", (void*)ZipFile_getEntry},
+                {"getEntryBytes", "(JI)[B", (void*)ZipFile_getEntryBytes},
+                {"getEntrySize", "(J)J", (void*)ZipFile_getEntrySize},
+                {"getEntryCSize", "(J)J", (void*)ZipFile_getEntryCSize},
+                {"getEntryMethod", "(J)I", (void*)ZipFile_getEntryMethod},
+                {"getEntryTime", "(J)J", (void*)ZipFile_getEntryTime},
+                {"getEntryCrc", "(J)J", (void*)ZipFile_getEntryCrc},
+                {"getEntryFlag", "(J)I", (void*)ZipFile_getEntryFlag},
+                {"getFileDescriptor", "(J)I", (void*)ZipFile_getFileDescriptor},
+                {"getCommentBytes", "(J)[B", (void*)ZipFile_getCommentBytes},
+                {"read", "(JJJ[BII)I", (void*)ZipFile_read},
+                {"startsWithLOC", "(J)Z", (void*)ZipFile_startsWithLOC},
+                {"ensureOpen", "()V", (void*)ZipFile_ensureOpen},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+    /* java.lang.Math */
+    {
+        jclass cls = (*env)->FindClass(env, "java/lang/Math");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"sin","(D)D",(void*)Math_sin},{"cos","(D)D",(void*)Math_cos},
+                {"tan","(D)D",(void*)Math_tan},{"asin","(D)D",(void*)Math_asin},
+                {"acos","(D)D",(void*)Math_acos},{"atan","(D)D",(void*)Math_atan},
+                {"atan2","(DD)D",(void*)Math_atan2},{"exp","(D)D",(void*)Math_exp},
+                {"log","(D)D",(void*)Math_log},{"log10","(D)D",(void*)Math_log10},
+                {"sqrt","(D)D",(void*)Math_sqrt},{"cbrt","(D)D",(void*)Math_cbrt},
+                {"ceil","(D)D",(void*)Math_ceil},{"floor","(D)D",(void*)Math_floor},
+                {"pow","(DD)D",(void*)Math_pow},{"sinh","(D)D",(void*)Math_sinh},
+                {"cosh","(D)D",(void*)Math_cosh},{"tanh","(D)D",(void*)Math_tanh},
+                {"expm1","(D)D",(void*)Math_expm1},{"log1p","(D)D",(void*)Math_log1p},
+                {"IEEEremainder","(DD)D",(void*)Math_IEEEremainder},
+                {"hypot","(DD)D",(void*)Math_hypot},
+                {"abs","(D)D",(void*)Math_abs_d},{"max","(DD)D",(void*)Math_max_d},
+                {"copySign","(DD)D",(void*)Math_copySign_d},
+                {"toDegrees","(D)D",(void*)Math_toDegrees},
+                {"round","(F)I",(void*)Math_round_f},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+    /* java.lang.StrictMath */
+    {
+        jclass cls = (*env)->FindClass(env, "java/lang/StrictMath");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"sin","(D)D",(void*)Math_sin},{"cos","(D)D",(void*)Math_cos},
+                {"tan","(D)D",(void*)Math_tan},{"asin","(D)D",(void*)Math_asin},
+                {"acos","(D)D",(void*)Math_acos},{"atan","(D)D",(void*)Math_atan},
+                {"atan2","(DD)D",(void*)Math_atan2},{"exp","(D)D",(void*)Math_exp},
+                {"log","(D)D",(void*)Math_log},{"log10","(D)D",(void*)Math_log10},
+                {"sqrt","(D)D",(void*)Math_sqrt},{"cbrt","(D)D",(void*)Math_cbrt},
+                {"ceil","(D)D",(void*)Math_ceil},{"floor","(D)D",(void*)Math_floor},
+                {"pow","(DD)D",(void*)Math_pow},{"sinh","(D)D",(void*)Math_sinh},
+                {"cosh","(D)D",(void*)Math_cosh},{"tanh","(D)D",(void*)Math_tanh},
+                {"expm1","(D)D",(void*)Math_expm1},{"log1p","(D)D",(void*)Math_log1p},
+                {"abs","(D)D",(void*)Math_abs_d},{"max","(DD)D",(void*)Math_max_d},
+                {"toDegrees","(D)D",(void*)Math_toDegrees},
+                {"random","()D",(void*)Math_random},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
     return JNI_VERSION_1_6;
 }
