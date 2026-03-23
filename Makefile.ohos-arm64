@@ -394,7 +394,26 @@ dalvikvm-main:
 	  -o $(BUILDDIR)/dalvikvm/dalvikvm.o 2>&1 && echo "OK: dalvikvm.cc" || echo "FAIL: dalvikvm.cc"
 
 # ============ link-runtime (dalvikvm without compiler) ============
-link-runtime: all ziparchive sigchain nativehelper dalvikvm-main fault-handler-stubs template-instantiations
+jni-stubs:
+	@mkdir -p $(BUILDDIR)/jni_stubs
+	@echo "=== JNI stubs (ARM64) ==="
+	@$(CC) $(TARGET_FLAGS) -fPIC -O2 -w \
+	    -I$(AOSP)/libnativehelper/include_jni \
+	    -DJNI_OnLoad=JNI_OnLoad_icu \
+	    -c $(STUBS)/icu_jni_stub.c \
+	    -o $(BUILDDIR)/jni_stubs/icu_jni_stub.o 2>&1 && echo "OK: icu_jni_stub.c" || echo "FAIL: icu_jni_stub.c"
+	@$(CC) $(TARGET_FLAGS) -fPIC -O2 -w \
+	    -I$(AOSP)/libnativehelper/include_jni \
+	    -DJNI_OnLoad=JNI_OnLoad_javacore \
+	    -c $(STUBS)/javacore_stub.c \
+	    -o $(BUILDDIR)/jni_stubs/javacore_stub.o 2>&1 && echo "OK: javacore_stub.c" || echo "FAIL: javacore_stub.c"
+	@$(CC) $(TARGET_FLAGS) -fPIC -O2 -w \
+	    -I$(AOSP)/libnativehelper/include_jni \
+	    -DJNI_OnLoad=JNI_OnLoad_openjdk \
+	    -c $(STUBS)/openjdk_stub.c \
+	    -o $(BUILDDIR)/jni_stubs/openjdk_stub.o 2>&1 && echo "OK: openjdk_stub.c" || echo "FAIL: openjdk_stub.c"
+
+link-runtime: all ziparchive sigchain nativehelper dalvikvm-main fault-handler-stubs template-instantiations jni-stubs
 	@echo "=== Linking dalvikvm (ARM64, static) ==="
 	@mkdir -p $(BUILDDIR)/bin
 	$(CXX) -o $(BUILDDIR)/bin/dalvikvm \
@@ -418,6 +437,9 @@ link-runtime: all ziparchive sigchain nativehelper dalvikvm-main fault-handler-s
 	  $(STUBS_OBJ) \
 	  $(BUILDDIR)/stubs/fault_handler_stubs.o \
 	  $(BUILDDIR)/stubs/template_instantiations.o \
+	  $(BUILDDIR)/jni_stubs/icu_jni_stub.o \
+	  $(BUILDDIR)/jni_stubs/javacore_stub.o \
+	  $(BUILDDIR)/jni_stubs/openjdk_stub.o \
 	  $(OHOS_SYSROOT)/usr/lib/libc++.a \
 	  $(OHOS_SYSROOT)/usr/lib/libc++abi.a \
 	  $(OHOS_SYSROOT)/usr/lib/libz.a \

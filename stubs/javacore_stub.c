@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <stdio.h>
+#include <limits.h>
 
 /* ==================== Helper: get fd int from FileDescriptor object ==================== */
 
@@ -277,6 +278,172 @@ static jstring linux_strerror(JNIEnv* env, jobject thiz, jint errnum) {
     return (*env)->NewStringUTF(env, strerror(errnum));
 }
 
+/* mkdir(String path, int mode) */
+static void linux_mkdir(JNIEnv* env, jobject thiz, jstring jpath, jint mode) {
+    const char* path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (mkdir(path, mode) < 0) {
+        throwErrnoException(env, "mkdir", errno);
+    }
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+}
+
+/* rename(String oldPath, String newPath) */
+static void linux_rename(JNIEnv* env, jobject thiz, jstring jold, jstring jnew) {
+    const char* oldp = (*env)->GetStringUTFChars(env, jold, NULL);
+    const char* newp = (*env)->GetStringUTFChars(env, jnew, NULL);
+    if (rename(oldp, newp) < 0) {
+        throwErrnoException(env, "rename", errno);
+    }
+    (*env)->ReleaseStringUTFChars(env, jnew, newp);
+    (*env)->ReleaseStringUTFChars(env, jold, oldp);
+}
+
+/* remove(String path) */
+static void linux_remove(JNIEnv* env, jobject thiz, jstring jpath) {
+    const char* path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (remove(path) < 0) {
+        throwErrnoException(env, "remove", errno);
+    }
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+}
+
+/* unlink(String path) */
+static void linux_unlink(JNIEnv* env, jobject thiz, jstring jpath) {
+    const char* path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (unlink(path) < 0) {
+        throwErrnoException(env, "unlink", errno);
+    }
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+}
+
+/* chmod(String path, int mode) */
+static void linux_chmod(JNIEnv* env, jobject thiz, jstring jpath, jint mode) {
+    const char* path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (chmod(path, mode) < 0) {
+        throwErrnoException(env, "chmod", errno);
+    }
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+}
+
+/* fchmod(FileDescriptor fd, int mode) */
+static void linux_fchmod(JNIEnv* env, jobject thiz, jobject fdObj, jint mode) {
+    int fd = getFd(env, fdObj);
+    if (fchmod(fd, mode) < 0) {
+        throwErrnoException(env, "fchmod", errno);
+    }
+}
+
+/* umask(int mask) */
+static jint linux_umask(JNIEnv* env, jobject thiz, jint mask) {
+    return (jint)umask(mask);
+}
+
+/* dup(FileDescriptor fd) -> FileDescriptor */
+static jobject linux_dup(JNIEnv* env, jobject thiz, jobject fdObj) {
+    int fd = getFd(env, fdObj);
+    int newfd = dup(fd);
+    if (newfd < 0) {
+        throwErrnoException(env, "dup", errno);
+        return NULL;
+    }
+    jclass fdCls = (*env)->FindClass(env, "java/io/FileDescriptor");
+    if (!fdCls) return NULL;
+    jmethodID ctor = (*env)->GetMethodID(env, fdCls, "<init>", "()V");
+    if (!ctor) return NULL;
+    jobject newFdObj = (*env)->NewObject(env, fdCls, ctor);
+    if (!newFdObj) return NULL;
+    jfieldID descField = (*env)->GetFieldID(env, fdCls, "descriptor", "I");
+    if (descField) (*env)->SetIntField(env, newFdObj, descField, newfd);
+    return newFdObj;
+}
+
+/* dup2(FileDescriptor oldFd, int newFd) -> FileDescriptor */
+static jobject linux_dup2(JNIEnv* env, jobject thiz, jobject fdObj, jint newfd) {
+    int fd = getFd(env, fdObj);
+    int result = dup2(fd, newfd);
+    if (result < 0) {
+        throwErrnoException(env, "dup2", errno);
+        return NULL;
+    }
+    jclass fdCls = (*env)->FindClass(env, "java/io/FileDescriptor");
+    if (!fdCls) return NULL;
+    jmethodID ctor = (*env)->GetMethodID(env, fdCls, "<init>", "()V");
+    if (!ctor) return NULL;
+    jobject newFdObj = (*env)->NewObject(env, fdCls, ctor);
+    if (!newFdObj) return NULL;
+    jfieldID descField = (*env)->GetFieldID(env, fdCls, "descriptor", "I");
+    if (descField) (*env)->SetIntField(env, newFdObj, descField, result);
+    return newFdObj;
+}
+
+/* ftruncate(FileDescriptor fd, long length) */
+static void linux_ftruncate(JNIEnv* env, jobject thiz, jobject fdObj, jlong length) {
+    int fd = getFd(env, fdObj);
+    if (ftruncate(fd, (off_t)length) < 0) {
+        throwErrnoException(env, "ftruncate", errno);
+    }
+}
+
+/* fsync(FileDescriptor fd) */
+static void linux_fsync(JNIEnv* env, jobject thiz, jobject fdObj) {
+    int fd = getFd(env, fdObj);
+    if (fsync(fd) < 0) {
+        throwErrnoException(env, "fsync", errno);
+    }
+}
+
+/* fdatasync(FileDescriptor fd) */
+static void linux_fdatasync(JNIEnv* env, jobject thiz, jobject fdObj) {
+    int fd = getFd(env, fdObj);
+    if (fdatasync(fd) < 0) {
+        throwErrnoException(env, "fdatasync", errno);
+    }
+}
+
+/* symlink(String oldPath, String newPath) */
+static void linux_symlink(JNIEnv* env, jobject thiz, jstring jold, jstring jnew) {
+    const char* oldp = (*env)->GetStringUTFChars(env, jold, NULL);
+    const char* newp = (*env)->GetStringUTFChars(env, jnew, NULL);
+    if (symlink(oldp, newp) < 0) {
+        throwErrnoException(env, "symlink", errno);
+    }
+    (*env)->ReleaseStringUTFChars(env, jnew, newp);
+    (*env)->ReleaseStringUTFChars(env, jold, oldp);
+}
+
+/* readlink(String path) -> String */
+static jstring linux_readlink(JNIEnv* env, jobject thiz, jstring jpath) {
+    const char* path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    char buf[PATH_MAX];
+    ssize_t n = readlink(path, buf, sizeof(buf) - 1);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    if (n < 0) {
+        throwErrnoException(env, "readlink", errno);
+        return NULL;
+    }
+    buf[n] = '\0';
+    return (*env)->NewStringUTF(env, buf);
+}
+
+/* realpath(String path) -> String */
+static jstring linux_realpath(JNIEnv* env, jobject thiz, jstring jpath) {
+    const char* path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    char resolved[PATH_MAX];
+    char* result = realpath(path, resolved);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    if (!result) {
+        throwErrnoException(env, "realpath", errno);
+        return NULL;
+    }
+    return (*env)->NewStringUTF(env, resolved);
+}
+
+/* getxattr(String path, String name) -> byte[] -- stub: not supported */
+static jbyteArray linux_getxattr(JNIEnv* env, jobject thiz, jstring jpath, jstring jname) {
+    throwErrnoException(env, "getxattr", ENOTSUP);
+    return NULL;
+}
+
 /* android_fdsan stubs */
 static void linux_android_fdsan_exchange_owner_tag(JNIEnv* env, jobject thiz,
                                                      jobject fd, jlong prev, jlong next) { }
@@ -430,6 +597,22 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
             {"android_fdsan_get_tag_value", "(J)J", (void*)linux_android_fdsan_get_tag_value},
             {"fcntlVoid", "(Ljava/io/FileDescriptor;I)I", (void*)linux_fcntlVoid},
             {"fcntlInt", "(Ljava/io/FileDescriptor;II)I", (void*)linux_fcntlInt},
+            {"mkdir", "(Ljava/lang/String;I)V", (void*)linux_mkdir},
+            {"rename", "(Ljava/lang/String;Ljava/lang/String;)V", (void*)linux_rename},
+            {"remove", "(Ljava/lang/String;)V", (void*)linux_remove},
+            {"unlink", "(Ljava/lang/String;)V", (void*)linux_unlink},
+            {"chmod", "(Ljava/lang/String;I)V", (void*)linux_chmod},
+            {"fchmod", "(Ljava/io/FileDescriptor;I)V", (void*)linux_fchmod},
+            {"umask", "(I)I", (void*)linux_umask},
+            {"dup", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;", (void*)linux_dup},
+            {"dup2", "(Ljava/io/FileDescriptor;I)Ljava/io/FileDescriptor;", (void*)linux_dup2},
+            {"ftruncate", "(Ljava/io/FileDescriptor;J)V", (void*)linux_ftruncate},
+            {"fsync", "(Ljava/io/FileDescriptor;)V", (void*)linux_fsync},
+            {"fdatasync", "(Ljava/io/FileDescriptor;)V", (void*)linux_fdatasync},
+            {"symlink", "(Ljava/lang/String;Ljava/lang/String;)V", (void*)linux_symlink},
+            {"readlink", "(Ljava/lang/String;)Ljava/lang/String;", (void*)linux_readlink},
+            {"realpath", "(Ljava/lang/String;)Ljava/lang/String;", (void*)linux_realpath},
+            {"getxattr", "(Ljava/lang/String;Ljava/lang/String;)[B", (void*)linux_getxattr},
         };
         (*env)->RegisterNatives(env, linuxClass, methods, sizeof(methods)/sizeof(methods[0]));
         (*env)->DeleteLocalRef(env, linuxClass);
