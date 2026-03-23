@@ -138,10 +138,10 @@ extern "C" int JNI_OnLoad_icu(void* vm, void* reserved);
 extern "C" int JNI_OnLoad_javacore(void* vm, void* reserved);
 extern "C" int JNI_OnLoad_openjdk(void* vm, void* reserved);
 
-// For static builds, use RTLD_DEFAULT so dlsym searches all symbols in the binary.
-// Each library needs a unique handle, but dlsym must work on it.
-// Solution: use dlopen(NULL) which returns a handle to the main program.
-static void* g_self_handle = NULL;
+// Static build: NO dlopen — musl deadlocks on dlopen in static binaries.
+// All JNI stubs are linked into the binary. Call JNI_OnLoad directly.
+// Use unique fake handles (non-NULL, unique per library) so ART doesn't dedup.
+static char g_fake_icu, g_fake_javacore, g_fake_openjdk, g_fake_ohbridge;
 static void* g_saved_vm = nullptr;
 
 void* OpenNativeLibrary(void* env, int target_sdk, const char* path, void* class_loader,
@@ -150,34 +150,41 @@ void* OpenNativeLibrary(void* env, int target_sdk, const char* path, void* class
     if (needs_native_bridge) *needs_native_bridge = false;
     if (error_msg) *error_msg = NULL;
 
-    // Get JavaVM from JNIEnv using proper JNI header offset
+    // Get JavaVM from JNIEnv (index 219 in function table)
     if (env && !g_saved_vm) {
-        // JNIEnv is pointer to JNINativeInterface*. GetJavaVM is at index 219.
         typedef int (*GetJavaVM_fn)(void* env, void** vm);
         void** funcs = *(void***)env;
         GetJavaVM_fn getVM = (GetJavaVM_fn)funcs[219];
         if (getVM) getVM(env, &g_saved_vm);
     }
 
-    // For static builds, dlopen(NULL) returns handle to the main binary.
-    // dlsym on this handle finds all exported symbols (JNI stubs + OHBridge).
-    if (!g_self_handle) g_self_handle = dlopen(NULL, RTLD_NOW);
-
+    // Static build: call JNI_OnLoad directly, return fake handle.
+    // NO dlopen — it deadlocks on static musl.
+    // ART will call dlsym(fake_handle, "JNI_OnLoad") which returns NULL,
+    // so ART says "No JNI_OnLoad found" — that's fine, we already called it.
     if (path && strstr(path, "libicu_jni")) {
         if (g_saved_vm) JNI_OnLoad_icu(g_saved_vm, NULL);
-        return g_self_handle;
+        return &g_fake_icu;
     }
     if (path && strstr(path, "libjavacore")) {
         if (g_saved_vm) JNI_OnLoad_javacore(g_saved_vm, NULL);
-        return g_self_handle;
+        return &g_fake_javacore;
     }
     if (path && strstr(path, "libopenjdk")) {
         if (g_saved_vm) JNI_OnLoad_openjdk(g_saved_vm, NULL);
-        return g_self_handle;
+        return &g_fake_openjdk;
     }
-    // For liboh_bridge.so and other dynamic libraries
-    void* handle = dlopen(path, RTLD_NOW);
-    if (handle) return handle;
+    // For liboh_bridge.so — must be statically linked on musl.
+    // Agent A compiles arkui_bridge.cpp as .o and links into dalvikvm.
+    // OHBridge uses JNI naming (Java_com_ohos_shim_bridge_OHBridge_*).
+    // artFindNativeMethod won't find them via dlsym (static musl has no dlsym).
+    // So OHBridge methods MUST be registered via RegisterNatives in JNI_OnLoad.
+    // If liboh_bridge has a JNI_OnLoad, call it:
+    extern int JNI_OnLoad_ohbridge(void*, void*) __attribute__((weak));
+    if (path && strstr(path, "liboh_bridge")) {
+        if (JNI_OnLoad_ohbridge && g_saved_vm) JNI_OnLoad_ohbridge(g_saved_vm, NULL);
+        return &g_fake_ohbridge;
+    }
 
     if (error_msg) *error_msg = strdup("Dynamic loading not supported (static build)");
     return NULL;
