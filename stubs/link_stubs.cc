@@ -587,12 +587,6 @@ void DexCache::AtomicStoreRelease16B(
 }  // namespace mirror
 }  // namespace art
 
-// =============================================================================
-// === JNI native method stubs (from jni_entrypoints.cc, failed to compile) ===
-// =============================================================================
-
-}  // extern "C"
-
 // XzCompress/XzDecompress by-value overloads (for JIT compiler)
 // These use mangled names directly to avoid needing ArrayRef definition
 extern "C" {
