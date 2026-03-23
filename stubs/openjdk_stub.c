@@ -509,13 +509,19 @@ static void Runtime_nativeGc(JNIEnv* env, jobject thiz) {
 
 static jstring Runtime_nativeLoad(JNIEnv* env, jclass clazz, jstring filename,
                                    jobject classLoader, jclass caller) {
-    /* Actually load the native library via dlopen + call JNI_OnLoad */
     if (!filename) return (*env)->NewStringUTF(env, "null filename");
     const char* path = (*env)->GetStringUTFChars(env, filename, NULL);
+    /* Return success for statically-linked libraries (JNI_OnLoad_* already called) */
+    if (strstr(path, "oh_bridge") || strstr(path, "javacore") ||
+        strstr(path, "openjdk") || strstr(path, "icu_jni") || strstr(path, "icu-jni")) {
+        (*env)->ReleaseStringUTFChars(env, filename, path);
+        return NULL; /* null = success */
+    }
+    /* Try dlopen for other libraries */
     void* handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
         const char* err = dlerror();
-        jstring result = (*env)->NewStringUTF(env, err ? err : "dlopen failed");
+        jstring result = (*env)->NewStringUTF(env, err ? err : "dlopen not supported");
         (*env)->ReleaseStringUTFChars(env, filename, path);
         return result;
     }
