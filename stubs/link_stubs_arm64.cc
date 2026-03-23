@@ -150,13 +150,12 @@ void* OpenNativeLibrary(void* env, int target_sdk, const char* path, void* class
     if (needs_native_bridge) *needs_native_bridge = false;
     if (error_msg) *error_msg = NULL;
 
-    // Get JavaVM from JNIEnv for calling JNI_OnLoad
+    // Get JavaVM from JNIEnv using proper JNI header offset
     if (env && !g_saved_vm) {
-        typedef struct { void* reserved[4]; void* fns[232]; } JNITable;
+        // JNIEnv is pointer to JNINativeInterface*. GetJavaVM is at index 219.
         typedef int (*GetJavaVM_fn)(void* env, void** vm);
-        JNITable** tbl = (JNITable**)env;
-        // GetJavaVM is at index 215 (0-based) in the function table
-        GetJavaVM_fn getVM = (GetJavaVM_fn)((*tbl)->fns[211]); // 215 - 4 reserved = 211
+        void** funcs = *(void***)env;
+        GetJavaVM_fn getVM = (GetJavaVM_fn)funcs[219];
         if (getVM) getVM(env, &g_saved_vm);
     }
 
