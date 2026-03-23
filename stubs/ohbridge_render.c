@@ -379,7 +379,7 @@ static void OHB_brushSetAntiAlias(JNIEnv*e,jclass c,jlong b,jboolean aa) {}
 static void OHB_brushDestroy(JNIEnv*e,jclass c,jlong b) {}
 
 /* Font */
-static jlong OHB_fontCreate(JNIEnv*e,jclass c) { int id=g_font_next++; if(id>=32)id=1; g_fonts[id].size=16; return id; }
+static jlong OHB_fontCreate(JNIEnv*e,jclass c,jfloat sz) { int id=g_font_next++; if(id>=32)id=1; g_fonts[id].size=sz; return id; }
 static void OHB_fontSetSize(JNIEnv*e,jclass c,jlong f,jfloat sz) { if(f>0&&f<32) g_fonts[f].size=sz; }
 static jfloat OHB_fontMeasureText(JNIEnv*e,jclass c,jlong f,jstring s) {
     if(!s) return 0;
