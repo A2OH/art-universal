@@ -10,14 +10,14 @@
 #include <stdio.h>
 #include <limits.h>
 
-/* Stub for registerNativesOrSkip - just calls RegisterNatives, ignoring failures */
-static int registerNativesOrSkip(JNIEnv* env, jclass clazz,
+/* Tolerant RegisterNatives — skip methods that don't exist in this DEX version */
+static void registerNativesOrSkip(JNIEnv* env, jclass clazz,
                                   const JNINativeMethod* methods, int numMethods) {
-    int registered = 0; for (int i = 0; i < numMethods; i++) { if ((*env)->RegisterNatives(env, clazz, &methods[i], 1) == 0) registered++; else (*env)->ExceptionClear(env); } return registered;
-    if (result != 0) {
-        (*env)->ExceptionClear(env);
+    for (int i = 0; i < numMethods; i++) {
+        if ((*env)->RegisterNatives(env, clazz, &methods[i], 1) < 0) {
+            (*env)->ExceptionClear(env);
+        }
     }
-    return result;
 }
 
 /* ==================== Helper: get fd int from FileDescriptor object ==================== */
