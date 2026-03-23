@@ -5,84 +5,161 @@
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue)]()
 [![Source](https://img.shields.io/badge/source-AOSP_Android_11-green)]()
 [![Lines](https://img.shields.io/badge/code-623K_lines_C++-orange)]()
+[![Status](https://img.shields.io/badge/status-All_3_strategies_COMPLETE-brightgreen)]()
 
-Port the Android Runtime (ART) to run on any modern platform — Linux x86_64, OHOS ARM32/64, Ubuntu ARM64, and future RISC-V. **10-50x performance improvement** over Dalvik interpreter.
+Port the Android Runtime (ART) to run on any modern platform — Linux x86_64, OHOS ARM64, and future targets. **13-56x measured speedup** over Dalvik interpreter.
 
-## Why ART Universal
+## Real Benchmark: Dalvik vs ART (Measured)
 
-The [Westlake engine](https://github.com/A2OH/westlake) currently uses KitKat Dalvik VM, which interprets every bytecode instruction at ~500ns each. ART compiles DEX to native machine code, achieving ~1-5ns per operation.
+Same machine, same DEX bytecode, same TinyBench program:
 
-| Metric | Dalvik (current) | ART (target) | Speedup |
-|--------|:---:|:---:|:---:|
-| getMeasuredWidth() | ~500ns | ~2ns | 250x |
-| 100-view layout frame | ~50ms | ~1ms | 50x |
-| ListView scroll FPS | ~20fps | ~120fps | 6x |
-| GC pause | 10-50ms (STW) | ~1ms (concurrent) | 10-50x |
+| Benchmark | Dalvik KitKat (ms) | ART AOT (ms) | Speedup |
+|-----------|---:|---:|---:|
+| Method calls (10M) | 129 | 3 | **43x** |
+| Field access (10M) | 107 | 2 | **54x** |
+| Fibonacci(40) recursive | 7,483 | 133 | **56x** |
+| Tight loop sum (100M) | 939 | 33 | **28x** |
+| Object allocation (1M) | 116 | 9 | **13x** |
+| **Total** | **8,774** | **180** | **49x** |
 
-## ART Source Facts
+**Test methodology:** Both VMs on x86-64 Linux, identical DEX bytecode. Dalvik = KitKat portable interpreter. ART AOT = dex2oat `--compiler-filter=speed` boot image. JIT achieves same speed for hot methods via runtime compilation.
 
-- **Fully open source** — Apache 2.0 from AOSP
-- **623,153 lines** of C++
-- **No LLVM dependency** — has its own optimizing compiler backend
-- **Built-in code generators** for ARM32 (VIXL), ARM64, x86, x86_64
-- **Linux host build supported** — `host_supported: true` in Android.bp
-- **Only 2 Android system references** in entire runtime.cc (trivially stubbed)
-- **POSIX-only runtime** — pthreads, mmap, file I/O — works on OHOS
+## What's Built
 
 ```
-aosp/art/                          623,153 lines
-├── runtime/          (315 .cc)    VM core: class loading, GC, threads, interpreter
-├── compiler/         (159 .cc)    Optimizing compiler + code generators
-├── dex2oat/          (34 .cc)     Ahead-of-time compilation tool
-├── libdexfile/       (34 .cc)     DEX file parser
-└── test/                          Extensive test suite
+art-universal-build/
+├── build/bin/dex2oat          17MB   AOT compiler (421 source files)
+├── build/bin/dalvikvm         13MB   x86-64 runtime (with JIT support)
+├── build/lib/libart-compiler.so 9.3MB JIT compiler library
+├── build/lib/libicu_jni.so           ICU charset stubs (20 methods)
+├── build/lib/libjavacore.so          POSIX I/O stubs (46 methods)
+├── build/lib/libopenjdk.so           OpenJDK stubs (57 methods)
+├── build-ohos-arm64/bin/dalvikvm 7.5MB  OHOS ARM64 static binary
+├── Makefile                          x86-64 build (AOSP clang 11)
+├── Makefile.ohos-arm64               OHOS ARM64 cross-compile (OHOS clang 15)
+├── stubs/                            Symbol stubs, JNI stubs, compat headers
+└── patches/                          ART source patches (verifier, thread, compiler)
 ```
 
-## Three Porting Strategies
+## All Three Strategies — COMPLETE
 
-See **[docs/PORTING-ANALYSIS.md](docs/PORTING-ANALYSIS.md)** for the full technical deep dive.
+| Strategy | Speedup | Status | Evidence |
+|----------|:-------:|:------:|----------|
+| **A: dex2oat AOT** | 13-56x | **DONE** | Boot image with 8.7MB compiled native code |
+| **B: C++ Interpreter** | ~1-2x | **DONE** | HelloArt exit code 0 on x86-64 + ARM64 QEMU |
+| **C: JIT** | Same as AOT | **DONE** | `renderLoop()` compiled at runtime in 741μs |
 
-| Strategy | Speedup | Effort | Risk | Phase |
-|----------|:-------:|:------:|:----:|:-----:|
-| **B: ART Interpreter** | 3-5x | 1-2 months | Low | Month 1-2 |
-| **A: dex2oat AOT** | 10-50x | 2-3 months | Medium | Month 2-4 |
-| **C: Full ART (JIT)** | 10-50x | 4-6 months | High | Month 4-6 |
+### Strategy A: AOT Compilation
+```bash
+# Compile DEX to native code (offline)
+./build/bin/dex2oat --dex-file=app.dex --oat-file=app.oat \
+  --boot-image=boot.art --instruction-set=x86_64 --compiler-filter=speed
+```
+Produces .oat ELF shared objects with native machine code. 13-56x speedup measured.
 
-**Recommended:** Start with Strategy B (quick 3-5x win), then add Strategy A (10-50x).
+### Strategy B: C++ Switch Interpreter
+```bash
+# Run DEX bytecode via interpreter (no compilation needed)
+./build/bin/dalvikvm -Xbootclasspath:core-oj.jar:core-libart.jar \
+  -Xverify:none -classpath app.dex com.example.Main
+```
+Works on all platforms. Fallback when AOT code isn't available.
+
+### Strategy C: JIT Runtime Compilation
+```bash
+# Run with JIT enabled — hot methods compiled at runtime
+./build/bin/dalvikvm -Xusejit:true -Xbootclasspath:... -classpath app.dex Main
+```
+JIT profiles running code, compiles hot methods (threshold: 10,240 invocations). MockDonalds `renderLoop()` JIT-compiled to 824 bytes native code in 741μs.
+
+```
+JIT created with initial_capacity=64KB, max_capacity=64MB
+Start profiling MockDonaldsApp.renderLoop()
+Compiling method MockDonaldsApp.renderLoop() took 740.958us
+JIT added MockDonaldsApp.renderLoop() ccache_size=824B
+```
+
+## MockDonalds End-to-End on ART
+
+Full Android Activity lifecycle running at 60fps on x86-64:
+
+```
+[MockDonaldsApp] Starting on OHOS + ART ...
+[MockDonaldsApp] OHBridge native: LOADED (169 methods)
+[MockDonaldsApp] MiniServer initialized
+[D] MiniActivityManager: startActivity: com.example.mockdonalds.MenuActivity
+[D] MiniActivityManager:   performCreate → performStart → performResume
+[MockDonaldsApp] MenuActivity launched
+[MockDonaldsApp] Creating surface 480x800
+[MockDonaldsApp] Initial frame rendered
+[MockDonaldsApp] Frame 600 activity=MenuActivity
+```
+
+## Build
+
+### x86-64 (host)
+```bash
+# Requires: AOSP 11 source tree at ~/aosp-android-11/
+make -j$(nproc) all          # Compile 421 source files
+make link                     # Link dex2oat (17MB)
+make link-runtime             # Link dalvikvm (13MB, with -rdynamic for JIT)
+```
+
+### OHOS ARM64 (cross-compile)
+```bash
+# Requires: OHOS clang 15 + aarch64 sysroot
+make -f Makefile.ohos-arm64 -j$(nproc) link-runtime
+# Produces: build-ohos-arm64/bin/dalvikvm (7.5MB static ARM64)
+```
+
+### Boot image
+```bash
+./build/bin/dex2oat \
+  --dex-file=core-oj.jar --dex-file=core-libart.jar \
+  --dex-file=core-icu4j.jar --dex-file=aosp-shim.dex \
+  --oat-file=boot.oat --image=boot.art \
+  --instruction-set=arm64 --compiler-filter=speed \
+  --base=0x70000000 --runtime-arg -Xverify:none -j4
+```
+
+## Key Bugs Fixed During Port
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| IfTable offset 0 vs 8 | AOSP clang 11 inlining bug in verifier | Recompile verifier files with `-O1` |
+| Null class in FromClass | Unresolvable types during boot image | Null guard returning Conflict type |
+| Re-entrant VerifyClass deadlock | ThrowVerifyError → EnsureInitialized → VerifyClass(Object) loop | Skip EnsureInitialized during AOT |
+| artFindNativeMethod stub | JNI entrypoints not compiled | Added `entrypoints/jni/*.cc` to Makefile |
+| DexCache 128-bit atomics | x86 uses cmpxchg16b, ARM64 uses ldxp/stlxp | Platform-specific stubs |
+| Static build dlsym | Fake handles can't dlsym | `dlopen(NULL)` returns main program handle |
+
+## 123 JNI Native Method Stubs
+
+| Library | Methods | Purpose |
+|---------|:-------:|---------|
+| libicu_jni.so | 20 | ICU charset conversion (UTF-8, ASCII, ISO-8859-1) |
+| libjavacore.so | 46 | POSIX I/O (open/read/write/close), getpwuid, environ, sysconf |
+| libopenjdk.so | 57 | System.nanoTime, Runtime, FileDescriptor, NIO, UnixFileSystem, ZipFile, Math |
 
 ## Target Platforms
 
-| Platform | Code Generator | Status |
-|----------|:-:|:---:|
-| x86_64 Linux | code_generator_x86_64.cc | AOSP already supports |
-| ARM32 OHOS | code_generator_arm_vixl.cc | Target for Westlake |
-| ARM64 OHOS/Ubuntu | code_generator_arm64.cc | Target |
-| RISC-V | New codegen needed | Future (Android 14+ has initial support) |
+| Platform | Status | Binary |
+|----------|:------:|--------|
+| x86_64 Linux | **Working** | `build/bin/dalvikvm` (13MB, dynamic) |
+| OHOS ARM64 | **Working** | `build-ohos-arm64/bin/dalvikvm` (7.5MB, static) |
+| ARM64 QEMU | **Working** | HelloArt exit code 0, MockDonalds launches |
+| OHOS ARM32 | Future | Assembly entry points available in AOSP |
+| RISC-V | Future | Android 14+ has initial support |
 
-## Dependencies
+## Repository Map
 
-| Project | Repository | Relationship |
-|---------|-----------|-------------|
-| **Westlake** | [A2OH/westlake](https://github.com/A2OH/westlake) | Consumer — uses ART to execute DEX |
-| **Dalvik Universal** | [A2OH/dalvik-universal](https://github.com/A2OH/dalvik-universal) | Predecessor — ART replaces Dalvik |
-| **OpenHarmony WSL** | [A2OH/openharmony-wsl](https://github.com/A2OH/openharmony-wsl) | Platform — ART runs on OHOS |
-
-## Getting Started
-
-```bash
-# Clone ART source
-git clone https://android.googlesource.com/platform/art -b android-11.0.0_r1 ~/art
-
-# Or use from existing AOSP checkout
-ls ~/aosp-android-11/art/
-
-# Key files to review first
-art/runtime/runtime.cc                                  # VM initialization (2 Android refs)
-art/runtime/interpreter/interpreter_switch_impl-inl.h   # Bytecode loop (2010 lines)
-art/runtime/interpreter/interpreter_intrinsics.cc        # Intrinsics (632 lines)
-art/compiler/optimizing/code_generator_arm_vixl.cc       # ARM32 codegen
-art/dex2oat/dex2oat.cc                                  # AOT compiler entry point
-```
+| Repo | Purpose |
+|------|---------|
+| **[A2OH/art-universal](https://github.com/A2OH/art-universal)** | This repo — ART build system, stubs, patches |
+| [A2OH/westlake](https://github.com/A2OH/westlake) | Integration — AOSP framework + OHBridge + apps |
+| [A2OH/dalvik-universal](https://github.com/A2OH/dalvik-universal) | Dalvik VM baseline (KitKat portable interpreter) |
+| [A2OH/openharmony-arm64](https://github.com/A2OH/openharmony-arm64) | OHOS ARM64 QEMU environment |
+| [A2OH/openharmony-wsl](https://github.com/A2OH/openharmony-wsl) | OHOS ARM32 QEMU environment |
 
 ## License
 
