@@ -412,6 +412,11 @@ jni-stubs:
 	    -DJNI_OnLoad=JNI_OnLoad_openjdk \
 	    -c $(STUBS)/openjdk_stub.c \
 	    -o $(BUILDDIR)/jni_stubs/openjdk_stub.o 2>&1 && echo "OK: openjdk_stub.c" || echo "FAIL: openjdk_stub.c"
+	@$(CC) $(TARGET_FLAGS) -fPIC -O2 -w \
+	    -I$(AOSP)/libnativehelper/include_jni \
+	    -DJNI_OnLoad=JNI_OnLoad_ohbridge \
+	    -c $(STUBS)/ohbridge_stub.c \
+	    -o $(BUILDDIR)/jni_stubs/ohbridge_stub.o 2>&1 && echo "OK: ohbridge_stub.c" || echo "FAIL: ohbridge_stub.c"
 
 link-runtime: all ziparchive sigchain nativehelper dalvikvm-main fault-handler-stubs template-instantiations jni-stubs
 	@echo "=== Linking dalvikvm (ARM64, static) ==="
@@ -440,6 +445,7 @@ link-runtime: all ziparchive sigchain nativehelper dalvikvm-main fault-handler-s
 	  $(BUILDDIR)/jni_stubs/icu_jni_stub.o \
 	  $(BUILDDIR)/jni_stubs/javacore_stub.o \
 	  $(BUILDDIR)/jni_stubs/openjdk_stub.o \
+	  $(BUILDDIR)/jni_stubs/ohbridge_stub.o \
 	  $(OHOS_SYSROOT)/usr/lib/libc++.a \
 	  $(OHOS_SYSROOT)/usr/lib/libc++abi.a \
 	  $(OHOS_SYSROOT)/usr/lib/libz.a \
