@@ -591,17 +591,6 @@ void DexCache::AtomicStoreRelease16B(
 // === JNI native method stubs (from jni_entrypoints.cc, failed to compile) ===
 // =============================================================================
 
-extern "C" {
-
-// when a native method needs to be resolved. In dex2oat --compiler-filter=verify
-// mode, these should never be reached. If called, return null (will trigger exception).
-  return nullptr;
-}
-  return nullptr;
-}
-  return 0;
-}
-
 }  // extern "C"
 
 // XzCompress/XzDecompress by-value overloads (for JIT compiler)
