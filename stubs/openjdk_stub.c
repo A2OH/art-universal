@@ -511,10 +511,17 @@ static jstring Runtime_nativeLoad(JNIEnv* env, jclass clazz, jstring filename,
                                    jobject classLoader, jclass caller) {
     if (!filename) return (*env)->NewStringUTF(env, "null filename");
     const char* path = (*env)->GetStringUTFChars(env, filename, NULL);
-    /* Return success for statically-linked libraries (JNI_OnLoad_* already called) */
-    if (strstr(path, "oh_bridge") || strstr(path, "javacore") ||
-        strstr(path, "openjdk") || strstr(path, "icu_jni") || strstr(path, "icu-jni")) {
+    /* Return success for statically-linked libraries */
+    if (strstr(path, "javacore") || strstr(path, "openjdk") ||
+        strstr(path, "icu_jni") || strstr(path, "icu-jni")) {
         (*env)->ReleaseStringUTFChars(env, filename, path);
+        return NULL; /* null = success, already registered */
+    }
+    /* OHBridge: register methods now (deferred from InitNativeMethods) */
+    if (strstr(path, "oh_bridge")) {
+        (*env)->ReleaseStringUTFChars(env, filename, path);
+        JavaVM* vm; (*env)->GetJavaVM(env, &vm);
+        JNI_OnLoad_ohbridge(vm, NULL);
         return NULL; /* null = success */
     }
     /* Try dlopen for other libraries */
@@ -807,6 +814,10 @@ static jdouble Math_random(JNIEnv* e, jclass c) { return (double)rand() / RAND_M
 static jdouble Math_rint(JNIEnv* e, jclass c, jdouble a) { return rint(a); }
 static jint Math_round_f(JNIEnv* e, jclass c, jfloat a) { return (jint)roundf(a); }
 static jlong Math_round_d(JNIEnv* e, jclass c, jdouble a) { return (jlong)round(a); }
+
+/* Forward declare ohbridge JNI_OnLoad - we call it ourselves since the weak link may not */
+extern jint JNI_OnLoad_ohbridge(JavaVM* vm, void* reserved);
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return -1;
@@ -1026,5 +1037,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
             (*env)->DeleteLocalRef(env, cls);
         }
     }
+    /* OHBridge registered later via Runtime_nativeLoad when System.loadLibrary is called */
     return JNI_VERSION_1_6;
 }

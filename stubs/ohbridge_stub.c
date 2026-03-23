@@ -182,9 +182,10 @@ static jboolean OHB_wifiSetEnabled(JNIEnv* env, jclass cls, jboolean a0) { retur
 static jint OHB_arkuiInit(JNIEnv*e,jclass c){return 0;}
 static jint OHB_arkuiInitAsync(JNIEnv*e,jclass c){return 0;}
 JNIEXPORT jint JNICALL JNI_OnLoad_ohbridge(JavaVM*vm,void*r){
+  fprintf(stderr, "[OHBridge] JNI_OnLoad_ohbridge CALLED\n");
   JNIEnv*e; if((*vm)->GetEnv(vm,(void**)&e,JNI_VERSION_1_6)!=JNI_OK)return-1;
   jclass c=(*e)->FindClass(e,"com/ohos/shim/bridge/OHBridge");
-  if(!c){printf("[OHBridge x86] class not found\n");return JNI_VERSION_1_6;}
+  if(!c){fprintf(stderr, "[OHBridge ARM64] class not found\n");return JNI_VERSION_1_6;}
   JNINativeMethod m[]={
     {"arkuiInit","()I",(void*)OHB_arkuiInit},
     {"audioGetRingerMode","()I",(void*)OHB_audioGetRingerMode},
@@ -359,4 +360,4 @@ JNIEXPORT jint JNICALL JNI_OnLoad_ohbridge(JavaVM*vm,void*r){
   int n=sizeof(m)/sizeof(m[0]);
   if((*e)->RegisterNatives(e,c,m,n)!=0){(*e)->ExceptionClear(e);
     for(int i=0;i<n;i++){if((*e)->RegisterNatives(e,c,&m[i],1)!=0)(*e)->ExceptionClear(e);}}
-  printf("[OHBridge x86] %d methods\n",n); return JNI_VERSION_1_6;}
+  fprintf(stderr, "[OHBridge ARM64] %d methods\n",n); return JNI_VERSION_1_6;}
