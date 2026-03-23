@@ -138,8 +138,10 @@ extern "C" int JNI_OnLoad_icu(void* vm, void* reserved);
 extern "C" int JNI_OnLoad_javacore(void* vm, void* reserved);
 extern "C" int JNI_OnLoad_openjdk(void* vm, void* reserved);
 
-// Fake handles for static JNI libraries (non-null, unique per library)
-static char g_handle_icu, g_handle_javacore, g_handle_openjdk;
+// For static builds, use RTLD_DEFAULT so dlsym searches all symbols in the binary.
+// Each library needs a unique handle, but dlsym must work on it.
+// Solution: use dlopen(NULL) which returns a handle to the main program.
+static void* g_self_handle = NULL;
 static void* g_saved_vm = nullptr;
 
 void* OpenNativeLibrary(void* env, int target_sdk, const char* path, void* class_loader,
@@ -150,26 +152,33 @@ void* OpenNativeLibrary(void* env, int target_sdk, const char* path, void* class
 
     // Get JavaVM from JNIEnv for calling JNI_OnLoad
     if (env && !g_saved_vm) {
-        // JNIEnv is JNINativeInterface**, GetJavaVM is at function table index 6
-        // But simpler: env is passed as void*, cast and call
+        typedef struct { void* reserved[4]; void* fns[232]; } JNITable;
         typedef int (*GetJavaVM_fn)(void* env, void** vm);
-        void** funcs = *(void***)env;
-        GetJavaVM_fn getVM = (GetJavaVM_fn)funcs[219]; // GetJavaVM index in JNI table
+        JNITable** tbl = (JNITable**)env;
+        // GetJavaVM is at index 215 (0-based) in the function table
+        GetJavaVM_fn getVM = (GetJavaVM_fn)((*tbl)->fns[211]); // 215 - 4 reserved = 211
         if (getVM) getVM(env, &g_saved_vm);
     }
 
+    // For static builds, dlopen(NULL) returns handle to the main binary.
+    // dlsym on this handle finds all exported symbols (JNI stubs + OHBridge).
+    if (!g_self_handle) g_self_handle = dlopen(NULL, RTLD_NOW);
+
     if (path && strstr(path, "libicu_jni")) {
         if (g_saved_vm) JNI_OnLoad_icu(g_saved_vm, NULL);
-        return &g_handle_icu;
+        return g_self_handle;
     }
     if (path && strstr(path, "libjavacore")) {
         if (g_saved_vm) JNI_OnLoad_javacore(g_saved_vm, NULL);
-        return &g_handle_javacore;
+        return g_self_handle;
     }
     if (path && strstr(path, "libopenjdk")) {
         if (g_saved_vm) JNI_OnLoad_openjdk(g_saved_vm, NULL);
-        return &g_handle_openjdk;
+        return g_self_handle;
     }
+    // For liboh_bridge.so and other dynamic libraries
+    void* handle = dlopen(path, RTLD_NOW);
+    if (handle) return handle;
 
     if (error_msg) *error_msg = strdup("Dynamic loading not supported (static build)");
     return NULL;
