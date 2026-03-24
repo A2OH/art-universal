@@ -355,26 +355,19 @@ static jlong OHB_surfaceCreate(JNIEnv*e,jclass c,jlong unused,jint w,jint h) {
     g_fb_w = w; g_fb_h = h; fb_init(); return 1;
 }
 static jlong OHB_surfaceGetCanvas(JNIEnv*e,jclass c,jlong s) { return 1; }
-static int g_fb_index = 0;
 static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
     if (!g_fb) return -1;
-    /* Double-buffer: write to fb0/fb1, update symlink-like "current" file */
-    const char* paths[] = {
-        "/data/local/tmp/a2oh/fb0.raw",
-        "/data/local/tmp/a2oh/fb1.raw"
-    };
-    int idx = g_fb_index;
-    g_fb_index = 1 - g_fb_index;
-    /* Write complete frame to inactive buffer */
-    int fd = open(paths[idx], O_WRONLY|O_CREAT|O_TRUNC, 0666);
+    /* Lock file: viewer skips read while .lock exists */
+    int lk = open("/data/local/tmp/a2oh/framebuffer.raw.lock", O_WRONLY|O_CREAT|O_TRUNC, 0666);
+    if (lk >= 0) close(lk);
+    int fd = open(FB_PATH, O_WRONLY|O_CREAT|O_TRUNC, 0666);
     if (fd >= 0) {
         write(fd, g_fb, g_fb_w * g_fb_h * 4);
         fsync(fd);
         close(fd);
-        /* Atomically update which buffer is current */
-        rename(paths[idx], FB_PATH);
     }
-    usleep(16000); /* ~60fps cap */
+    unlink("/data/local/tmp/a2oh/framebuffer.raw.lock");
+    usleep(33000); /* ~30fps */
     return 0;
 }
 static void OHB_surfaceDestroy(JNIEnv*e,jclass c,jlong s) {}
