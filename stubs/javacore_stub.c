@@ -568,6 +568,9 @@ static void OsConstants_initConstants(JNIEnv* env, jclass clazz) {
     #undef SET_INT
 }
 
+/* AsynchronousCloseMonitor stubs */
+static void ACM_signalBlockedThreads(JNIEnv* env, jclass cls, jobject fd) { /* no-op */ }
+
 /* ==================== JNI_OnLoad ==================== */
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
@@ -634,6 +637,18 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         if (cls) {
             JNINativeMethod methods[] = {
                 {"initConstants", "()V", (void*)OsConstants_initConstants},
+            };
+            registerNativesOrSkip(env, cls, methods, 1);
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+
+    /* AsynchronousCloseMonitor */
+    {
+        jclass cls = (*env)->FindClass(env, "libcore/io/AsynchronousCloseMonitor");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"signalBlockedThreads", "(Ljava/io/FileDescriptor;)V", (void*)ACM_signalBlockedThreads},
             };
             registerNativesOrSkip(env, cls, methods, 1);
             (*env)->DeleteLocalRef(env, cls);
