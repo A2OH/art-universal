@@ -187,12 +187,11 @@ static void draw_rect_fill(int x1, int y1, int x2, int y2, uint32_t color) {
             g_fb[y * g_fb_w + x] = color;
 }
 
-static void draw_text_stb(const char* text, int x, int y, uint32_t color, float size) {
+/* y = baseline position (Android Canvas convention) */
+static void draw_text_stb(const char* text, int x, int y_baseline, uint32_t color, float size) {
     if (!text || !g_font_loaded) return;
     float scale_f = stbtt_ScaleForPixelHeight(&g_stb_font, size);
-    int ascent, descent, lineGap;
-    stbtt_GetFontVMetrics(&g_stb_font, &ascent, &descent, &lineGap);
-    int baseline = (int)(ascent * scale_f);
+    int baseline = y_baseline; /* y IS the baseline already */
     uint8_t r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = color & 0xFF;
 
     float xpos = (float)x;
@@ -203,7 +202,7 @@ static void draw_text_stb(const char* text, int x, int y, uint32_t color, float 
                                                        *p, &w, &h, &xoff, &yoff);
         if (bmp) {
             for (int gy = 0; gy < h; gy++) {
-                int py = y + baseline + yoff + gy;
+                int py = baseline + yoff + gy;
                 if (py < 0 || py >= g_fb_h) continue;
                 for (int gx = 0; gx < w; gx++) {
                     int px2 = (int)xpos + xoff + gx;
@@ -420,12 +419,12 @@ static void OHB_canvasDrawText(JNIEnv*e,jclass c,jlong cn,jstring js,jfloat x,jf
     else if (brush > 0 && brush < 64) col = g_brushes[brush].color;
     float sz = 16;
     if (font > 0 && font < 32) sz = g_fonts[font].size;
-    if (sz < 14) sz = 14; /* minimum readable size */
+    if (sz < 20) sz = 20; /* minimum readable size on 480x800 */
     if (g_font_loaded) {
         draw_text_stb(s, (int)(x+g_tx), (int)(y+g_ty), col, sz);
     } else {
         int scale = (int)(sz / 8); if (scale < 2) scale = 2;
-        draw_text(s, (int)(x+g_tx), (int)(y+g_ty - 8*scale), col, scale);
+        draw_text(s, (int)(x+g_tx), (int)(y+g_ty - scale*6), col, scale);
     }
     (*e)->ReleaseStringUTFChars(e, js, s);
 }
@@ -497,8 +496,22 @@ static void OHB_fontDestroy(JNIEnv*e,jclass c,jlong f) {}
 static jfloatArray OHB_fontGetMetrics(JNIEnv*e,jclass c,jlong f) {
     jfloatArray arr=(*e)->NewFloatArray(e,4);
     float sz = (f>0&&f<32) ? g_fonts[f].size : 16;
-    jfloat m[]={-sz*0.8f, sz*0.2f, 0, sz};
-    (*e)->SetFloatArrayRegion(e,arr,0,4,m); return arr;
+    if (g_font_loaded) {
+        int ascent, descent, lineGap;
+        stbtt_GetFontVMetrics(&g_stb_font, &ascent, &descent, &lineGap);
+        float scale = stbtt_ScaleForPixelHeight(&g_stb_font, sz);
+        jfloat m[] = {
+            ascent * scale,    /* ascent (negative in Android convention) */
+            descent * scale,   /* descent */
+            lineGap * scale,   /* leading */
+            (ascent - descent + lineGap) * scale  /* height */
+        };
+        (*e)->SetFloatArrayRegion(e,arr,0,4,m);
+    } else {
+        jfloat m[]={-sz*0.8f, sz*0.2f, 0, sz};
+        (*e)->SetFloatArrayRegion(e,arr,0,4,m);
+    }
+    return arr;
 }
 
 /* Bitmap */
