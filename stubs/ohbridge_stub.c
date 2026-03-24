@@ -6,6 +6,8 @@
  * Framebuffer: /data/local/tmp/a2oh/framebuffer.raw (ARGB, 480x800)
  * Touch input: /data/local/tmp/a2oh/touch.dat (binary: action,x,y as int32s)
  */
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
 #include <jni.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,20 +29,46 @@ static uint32_t* g_fb = NULL;  /* Pixel buffer ARGB */
 static int g_fb_fd = -1;
 static int g_fb_w = FB_W, g_fb_h = FB_H;
 
+/* stb_truetype font */
+static stbtt_fontinfo g_stb_font;
+static unsigned char* g_font_data = NULL;
+static int g_font_loaded = 0;
+
+static void font_init(void) {
+    if (g_font_loaded) return;
+    /* Try to load a TTF font file */
+    const char* paths[] = {
+        "/data/local/tmp/a2oh/DejaVuSans.ttf",
+        "/system/fonts/DroidSans.ttf",
+        "/system/fonts/Roboto-Regular.ttf",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        FILE* f = fopen(paths[i], "rb");
+        if (!f) continue;
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        g_font_data = (unsigned char*)malloc(sz);
+        fread(g_font_data, 1, sz, f);
+        fclose(f);
+        if (stbtt_InitFont(&g_stb_font, g_font_data, 0)) {
+            g_font_loaded = 1;
+            fprintf(stderr, "[OHBridge] Loaded font: %s\n", paths[i]);
+            return;
+        }
+        free(g_font_data); g_font_data = NULL;
+    }
+    fprintf(stderr, "[OHBridge] No TTF font found, using bitmap font\n");
+}
+
 static void fb_init(void) {
     if (g_fb) return;
     size_t sz = g_fb_w * g_fb_h * 4;
-    g_fb_fd = open(FB_PATH, O_RDWR | O_CREAT | O_TRUNC, 0666);
-    if (g_fb_fd < 0) {
-        g_fb = (uint32_t*)calloc(g_fb_w * g_fb_h, 4);
-        return;
-    }
-    ftruncate(g_fb_fd, sz);
-    g_fb = (uint32_t*)mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, g_fb_fd, 0);
-    if (g_fb == MAP_FAILED) {
-        g_fb = (uint32_t*)calloc(g_fb_w * g_fb_h, 4);
-        close(g_fb_fd); g_fb_fd = -1;
-    }
+    /* Use plain malloc — write to file atomically on flush */
+    g_fb = (uint32_t*)calloc(g_fb_w * g_fb_h, 4);
+    g_fb_fd = 1; /* flag: initialized */
+    font_init();
 }
 
 /* ── Basic 8x8 bitmap font (printable ASCII 32-126) ── */
@@ -159,8 +187,58 @@ static void draw_rect_fill(int x1, int y1, int x2, int y2, uint32_t color) {
             g_fb[y * g_fb_w + x] = color;
 }
 
+static void draw_text_stb(const char* text, int x, int y, uint32_t color, float size) {
+    if (!text || !g_font_loaded) return;
+    float scale_f = stbtt_ScaleForPixelHeight(&g_stb_font, size);
+    int ascent, descent, lineGap;
+    stbtt_GetFontVMetrics(&g_stb_font, &ascent, &descent, &lineGap);
+    int baseline = (int)(ascent * scale_f);
+    uint8_t r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = color & 0xFF;
+
+    float xpos = (float)x;
+    for (const char* p = text; *p; p++) {
+        if (*p < 32) continue;
+        int w, h, xoff, yoff;
+        unsigned char* bmp = stbtt_GetCodepointBitmap(&g_stb_font, scale_f, scale_f,
+                                                       *p, &w, &h, &xoff, &yoff);
+        if (bmp) {
+            for (int gy = 0; gy < h; gy++) {
+                int py = y + baseline + yoff + gy;
+                if (py < 0 || py >= g_fb_h) continue;
+                for (int gx = 0; gx < w; gx++) {
+                    int px2 = (int)xpos + xoff + gx;
+                    if (px2 < 0 || px2 >= g_fb_w) continue;
+                    uint8_t alpha = bmp[gy * w + gx];
+                    if (alpha > 0) {
+                        uint32_t bg = g_fb[py * g_fb_w + px2];
+                        uint8_t br2 = (bg >> 16) & 0xFF, bg2 = (bg >> 8) & 0xFF, bb = bg & 0xFF;
+                        uint8_t nr = (r * alpha + br2 * (255 - alpha)) / 255;
+                        uint8_t ng = (g * alpha + bg2 * (255 - alpha)) / 255;
+                        uint8_t nb = (b * alpha + bb * (255 - alpha)) / 255;
+                        g_fb[py * g_fb_w + px2] = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
+                    }
+                }
+            }
+            stbtt_FreeBitmap(bmp, NULL);
+        }
+        int advance, lsb;
+        stbtt_GetCodepointHMetrics(&g_stb_font, *p, &advance, &lsb);
+        xpos += advance * scale_f;
+        if (*(p+1)) {
+            int kern = stbtt_GetCodepointKernAdvance(&g_stb_font, *p, *(p+1));
+            xpos += kern * scale_f;
+        }
+    }
+}
+
 static void draw_text(const char* text, int x, int y, uint32_t color, int scale) {
-    if (!text || scale < 1) return;
+    if (!text) return;
+    if (g_font_loaded) {
+        draw_text_stb(text, x, y - scale*8, color, (float)(scale * 8));
+        return;
+    }
+    /* Fallback: bitmap font */
+    if (scale < 1) scale = 1;
     int ox = x;
     for (; *text; text++) {
         if (*text == '\n') { y += 8*scale; x = ox; continue; }
@@ -277,8 +355,26 @@ static jlong OHB_surfaceCreate(JNIEnv*e,jclass c,jlong unused,jint w,jint h) {
     g_fb_w = w; g_fb_h = h; fb_init(); return 1;
 }
 static jlong OHB_surfaceGetCanvas(JNIEnv*e,jclass c,jlong s) { return 1; }
+static int g_fb_index = 0;
 static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
-    if (g_fb && g_fb_fd >= 0) msync(g_fb, g_fb_w*g_fb_h*4, MS_SYNC);
+    if (!g_fb) return -1;
+    /* Double-buffer: write to fb0/fb1, update symlink-like "current" file */
+    const char* paths[] = {
+        "/data/local/tmp/a2oh/fb0.raw",
+        "/data/local/tmp/a2oh/fb1.raw"
+    };
+    int idx = g_fb_index;
+    g_fb_index = 1 - g_fb_index;
+    /* Write complete frame to inactive buffer */
+    int fd = open(paths[idx], O_WRONLY|O_CREAT|O_TRUNC, 0666);
+    if (fd >= 0) {
+        write(fd, g_fb, g_fb_w * g_fb_h * 4);
+        fsync(fd);
+        close(fd);
+        /* Atomically update which buffer is current */
+        rename(paths[idx], FB_PATH);
+    }
+    usleep(16000); /* ~60fps cap */
     return 0;
 }
 static void OHB_surfaceDestroy(JNIEnv*e,jclass c,jlong s) {}
@@ -329,12 +425,15 @@ static void OHB_canvasDrawText(JNIEnv*e,jclass c,jlong cn,jstring js,jfloat x,jf
     uint32_t col = 0xFF000000;
     if (pen > 0 && pen < 64) col = g_pens[pen].color;
     else if (brush > 0 && brush < 64) col = g_brushes[brush].color;
-    int scale = 2;
-    if (font > 0 && font < 32) {
-        float sz = g_fonts[font].size;
-        scale = (int)(sz / 8); if (scale < 1) scale = 1; if (scale > 4) scale = 4;
+    float sz = 16;
+    if (font > 0 && font < 32) sz = g_fonts[font].size;
+    if (sz < 14) sz = 14; /* minimum readable size */
+    if (g_font_loaded) {
+        draw_text_stb(s, (int)(x+g_tx), (int)(y+g_ty), col, sz);
+    } else {
+        int scale = (int)(sz / 8); if (scale < 2) scale = 2;
+        draw_text(s, (int)(x+g_tx), (int)(y+g_ty - 8*scale), col, scale);
     }
-    draw_text(s, (int)(x+g_tx), (int)(y+g_ty - 8*scale), col, scale);
     (*e)->ReleaseStringUTFChars(e, js, s);
 }
 
@@ -383,8 +482,21 @@ static jlong OHB_fontCreate(JNIEnv*e,jclass c) { int id=g_font_next++; if(id>=32
 static void OHB_fontSetSize(JNIEnv*e,jclass c,jlong f,jfloat sz) { if(f>0&&f<32) g_fonts[f].size=sz; }
 static jfloat OHB_fontMeasureText(JNIEnv*e,jclass c,jlong f,jstring s) {
     if(!s) return 0;
-    int len = (*e)->GetStringLength(e, s);
     float sz = (f>0&&f<32) ? g_fonts[f].size : 16;
+    if (g_font_loaded) {
+        const char* text = (*e)->GetStringUTFChars(e, s, 0);
+        float scale_f = stbtt_ScaleForPixelHeight(&g_stb_font, sz);
+        float width = 0;
+        for (const char* p = text; *p; p++) {
+            int advance, lsb;
+            stbtt_GetCodepointHMetrics(&g_stb_font, *p, &advance, &lsb);
+            width += advance * scale_f;
+            if (*(p+1)) width += stbtt_GetCodepointKernAdvance(&g_stb_font, *p, *(p+1)) * scale_f;
+        }
+        (*e)->ReleaseStringUTFChars(e, s, text);
+        return (jfloat)width;
+    }
+    int len = (*e)->GetStringLength(e, s);
     int scale = (int)(sz/8); if(scale<1) scale=1;
     return (jfloat)(len * 8 * scale);
 }
@@ -579,6 +691,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad_ohbridge(JavaVM*vm,void*r){
     {"checkPermission","(Ljava/lang/String;)I",(void*)OHB_checkPermission},
     {"clipboardGet","()Ljava/lang/String;",(void*)OHB_clipboardGet},
     {"clipboardSet","(Ljava/lang/String;)V",(void*)OHB_clipboardSet},
+    {"fontCreate","()J",(void*)OHB_fontCreate},
     {"fontDestroy","(J)V",(void*)OHB_fontDestroy},
     {"fontGetMetrics","(J)[F",(void*)OHB_fontGetMetrics},
     {"fontMeasureText","(JLjava/lang/String;)F",(void*)OHB_fontMeasureText},
