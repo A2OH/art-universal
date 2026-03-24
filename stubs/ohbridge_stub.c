@@ -354,19 +354,19 @@ static jlong OHB_surfaceCreate(JNIEnv*e,jclass c,jlong unused,jint w,jint h) {
     g_fb_w = w; g_fb_h = h; fb_init(); return 1;
 }
 static jlong OHB_surfaceGetCanvas(JNIEnv*e,jclass c,jlong s) { return 1; }
+static int g_flush_count = 0;
 static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
     if (!g_fb) return -1;
-    /* Lock file: viewer skips read while .lock exists */
-    int lk = open("/data/local/tmp/a2oh/framebuffer.raw.lock", O_WRONLY|O_CREAT|O_TRUNC, 0666);
-    if (lk >= 0) close(lk);
-    int fd = open(FB_PATH, O_WRONLY|O_CREAT|O_TRUNC, 0666);
+    g_flush_count++;
+    /* Write first 3 frames then stop (static content) */
+    if (g_flush_count > 3) return 0;
+    int fd = open(FB_PATH, O_WRONLY|O_CREAT, 0666);
     if (fd >= 0) {
+        ftruncate(fd, g_fb_w * g_fb_h * 4);
         write(fd, g_fb, g_fb_w * g_fb_h * 4);
         fsync(fd);
         close(fd);
     }
-    unlink("/data/local/tmp/a2oh/framebuffer.raw.lock");
-    usleep(33000); /* ~30fps */
     return 0;
 }
 static void OHB_surfaceDestroy(JNIEnv*e,jclass c,jlong s) {}
