@@ -380,7 +380,7 @@ static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
         write(g_flush_fd, g_fb, g_fb_w * g_fb_h * 4);
     }
     /* Write PNG once (for phone viewer — /sdcard/ is always readable) */
-    if (!g_png_written && g_has_content) {
+    if (g_has_content) {
         /* Convert BGRA to RGBA for PNG */
         uint8_t* rgba = (uint8_t*)malloc(g_fb_w * g_fb_h * 4);
         if (rgba) {
@@ -393,7 +393,7 @@ static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
             }
             stbi_write_png(FB_PNG, g_fb_w, g_fb_h, 4, rgba, g_fb_w * 4);
             free(rgba);
-            g_png_written = 1;
+            
         }
     }
     usleep(33000);
