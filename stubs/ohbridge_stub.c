@@ -3,7 +3,7 @@
  * An Android viewer app reads the file and displays it on a SurfaceView.
  *
  * Entry point: JNI_OnLoad_ohbridge (called from Runtime_nativeLoad)
- * Framebuffer: /data/local/tmp/a2oh/framebuffer.raw (ARGB, 480x800)
+ * Framebuffer: /sdcard/framebuffer.raw (ARGB, 480x800)
  * Touch input: /data/local/tmp/a2oh/touch.dat (binary: action,x,y as int32s)
  */
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -354,19 +354,26 @@ static jlong OHB_surfaceCreate(JNIEnv*e,jclass c,jlong unused,jint w,jint h) {
     g_fb_w = w; g_fb_h = h; fb_init(); return 1;
 }
 static jlong OHB_surfaceGetCanvas(JNIEnv*e,jclass c,jlong s) { return 1; }
-static int g_flush_count = 0;
+static int g_flush_fd = -1;
+static int g_has_content = 0;
 static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
     if (!g_fb) return -1;
-    g_flush_count++;
-    /* Write first 3 frames then stop (static content) */
-    if (g_flush_count > 3) return 0;
-    int fd = open(FB_PATH, O_WRONLY|O_CREAT, 0666);
-    if (fd >= 0) {
-        ftruncate(fd, g_fb_w * g_fb_h * 4);
-        write(fd, g_fb, g_fb_w * g_fb_h * 4);
-        fsync(fd);
-        close(fd);
+    /* Check if frame has any non-background content */
+    if (!g_has_content) {
+        uint32_t bg = 0xFFF5F5F5;
+        for (int i = 0; i < g_fb_w * g_fb_h; i++) {
+            if (g_fb[i] != bg && g_fb[i] != 0) { g_has_content = 1; break; }
+        }
     }
+    if (!g_has_content) return 0; /* Skip writing clear-only frames */
+    if (g_flush_fd < 0) {
+        g_flush_fd = open(FB_PATH, O_WRONLY|O_CREAT, 0666);
+        if (g_flush_fd < 0) return -1;
+        ftruncate(g_flush_fd, g_fb_w * g_fb_h * 4);
+    }
+    lseek(g_flush_fd, 0, SEEK_SET);
+    write(g_flush_fd, g_fb, g_fb_w * g_fb_h * 4);
+    usleep(33000);
     return 0;
 }
 static void OHB_surfaceDestroy(JNIEnv*e,jclass c,jlong s) {}
@@ -501,8 +508,8 @@ static jfloatArray OHB_fontGetMetrics(JNIEnv*e,jclass c,jlong f) {
         stbtt_GetFontVMetrics(&g_stb_font, &ascent, &descent, &lineGap);
         float scale = stbtt_ScaleForPixelHeight(&g_stb_font, sz);
         jfloat m[] = {
-            ascent * scale,    /* ascent (negative in Android convention) */
-            descent * scale,   /* descent */
+            -ascent * scale,   /* ascent: negative in Android convention */
+            -descent * scale,  /* descent: positive in Android convention */
             lineGap * scale,   /* leading */
             (ascent - descent + lineGap) * scale  /* height */
         };
