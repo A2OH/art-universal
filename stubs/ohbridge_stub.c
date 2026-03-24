@@ -8,6 +8,8 @@
  */
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 #include <jni.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +25,8 @@
 #define FB_W 480
 #define FB_H 800
 #define FB_PATH "/data/local/tmp/a2oh/framebuffer.raw"
-#define TOUCH_PATH "/data/local/tmp/a2oh/touch.dat"
+#define FB_PNG "/sdcard/westlake_frame.png"
+#define TOUCH_PATH "/sdcard/westlake_touch.dat"
 
 static uint32_t* g_fb = NULL;  /* Pixel buffer ARGB */
 static int g_fb_fd = -1;
@@ -356,6 +359,7 @@ static jlong OHB_surfaceCreate(JNIEnv*e,jclass c,jlong unused,jint w,jint h) {
 static jlong OHB_surfaceGetCanvas(JNIEnv*e,jclass c,jlong s) { return 1; }
 static int g_flush_fd = -1;
 static int g_has_content = 0;
+static int g_png_written = 0;
 static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
     if (!g_fb) return -1;
     /* Check if frame has any non-background content */
@@ -366,13 +370,32 @@ static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
         }
     }
     if (!g_has_content) return 0; /* Skip writing clear-only frames */
+    /* Write raw framebuffer (for PC pulling) */
     if (g_flush_fd < 0) {
         g_flush_fd = open(FB_PATH, O_WRONLY|O_CREAT, 0666);
-        if (g_flush_fd < 0) return -1;
-        ftruncate(g_flush_fd, g_fb_w * g_fb_h * 4);
+        if (g_flush_fd >= 0) ftruncate(g_flush_fd, g_fb_w * g_fb_h * 4);
     }
-    lseek(g_flush_fd, 0, SEEK_SET);
-    write(g_flush_fd, g_fb, g_fb_w * g_fb_h * 4);
+    if (g_flush_fd >= 0) {
+        lseek(g_flush_fd, 0, SEEK_SET);
+        write(g_flush_fd, g_fb, g_fb_w * g_fb_h * 4);
+    }
+    /* Write PNG once (for phone viewer — /sdcard/ is always readable) */
+    if (!g_png_written && g_has_content) {
+        /* Convert BGRA to RGBA for PNG */
+        uint8_t* rgba = (uint8_t*)malloc(g_fb_w * g_fb_h * 4);
+        if (rgba) {
+            for (int i = 0; i < g_fb_w * g_fb_h; i++) {
+                uint32_t p = g_fb[i];
+                rgba[i*4+0] = (p >> 16) & 0xFF; /* R */
+                rgba[i*4+1] = (p >> 8) & 0xFF;  /* G */
+                rgba[i*4+2] = p & 0xFF;          /* B */
+                rgba[i*4+3] = (p >> 24) & 0xFF;  /* A */
+            }
+            stbi_write_png(FB_PNG, g_fb_w, g_fb_h, 4, rgba, g_fb_w * 4);
+            free(rgba);
+            g_png_written = 1;
+        }
+    }
     usleep(33000);
     return 0;
 }
