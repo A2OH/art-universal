@@ -26,6 +26,25 @@ static int registerNativesOrSkip(JNIEnv* env, jclass clazz,
     return registered;
 }
 
+/* ==================== Float/Double bit conversion (ART intrinsics fallback) ==================== */
+static jint Float_floatToRawIntBits(JNIEnv* env, jclass cls, jfloat f) {
+    union { jfloat f; jint i; } u; u.f = f; return u.i;
+}
+static jfloat Float_intBitsToFloat(JNIEnv* env, jclass cls, jint i) {
+    union { jfloat f; jint i; } u; u.i = i; return u.f;
+}
+static jlong Double_doubleToRawLongBits(JNIEnv* env, jclass cls, jdouble d) {
+    union { jdouble d; jlong l; } u; u.d = d; return u.l;
+}
+static jdouble Double_longBitsToDouble(JNIEnv* env, jclass cls, jlong l) {
+    union { jdouble d; jlong l; } u; u.l = l; return u.d;
+}
+
+/* Called by ART during early init — registers critical natives before class loading */
+__attribute__((constructor)) void westlake_register_intrinsics() {
+    /* These will be registered later via JNI_OnLoad, but we mark them available */
+}
+
 /* ==================== java.lang.System natives ==================== */
 
 static jobjectArray System_specialProperties(JNIEnv* env, jclass ignored) {
@@ -815,12 +834,76 @@ static jdouble Math_rint(JNIEnv* e, jclass c, jdouble a) { return rint(a); }
 static jint Math_round_f(JNIEnv* e, jclass c, jfloat a) { return (jint)roundf(a); }
 static jlong Math_round_d(JNIEnv* e, jclass c, jdouble a) { return (jlong)round(a); }
 
+/* ==================== java.lang.Character natives ==================== */
+#include <ctype.h>
+#include <wctype.h>
+
+static jboolean Character_isDigitImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='0'&&cp<='9')?JNI_TRUE:JNI_FALSE; }
+static jboolean Character_isUpperCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='A'&&cp<='Z')?JNI_TRUE:JNI_FALSE; }
+static jboolean Character_isLowerCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='a'&&cp<='z')?JNI_TRUE:JNI_FALSE; }
+static jboolean Character_isLetterImpl(JNIEnv*e,jclass c,jint cp) { return ((cp>='A'&&cp<='Z')||(cp>='a'&&cp<='z'))?JNI_TRUE:JNI_FALSE; }
+static jint Character_toUpperCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='a'&&cp<='z')?(cp-32):cp; }
+static jint Character_toLowerCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='A'&&cp<='Z')?(cp+32):cp; }
+static jboolean Character_isWhitespaceImpl(JNIEnv*e,jclass c,jint cp) { return (cp==' '||cp=='\t'||cp=='\n'||cp=='\r'||cp=='\f')?JNI_TRUE:JNI_FALSE; }
+static jboolean Character_isSpaceCharImpl(JNIEnv*e,jclass c,jint cp) { return (cp==' '||cp==0xA0)?JNI_TRUE:JNI_FALSE; }
+static jint Character_digitImpl(JNIEnv*e,jclass c,jint cp,jint radix) {
+    if(radix<2||radix>36) return -1;
+    int v=-1;
+    if(cp>='0'&&cp<='9') v=cp-'0';
+    else if(cp>='A'&&cp<='Z') v=cp-'A'+10;
+    else if(cp>='a'&&cp<='z') v=cp-'a'+10;
+    return (v>=0&&v<radix)?v:-1;
+}
+static jint Character_getTypeImpl(JNIEnv*e,jclass c,jint cp) {
+    if(cp>='A'&&cp<='Z') return 1; /* UPPERCASE_LETTER */
+    if(cp>='a'&&cp<='z') return 2; /* LOWERCASE_LETTER */
+    if(cp>='0'&&cp<='9') return 9; /* DECIMAL_DIGIT_NUMBER */
+    if(cp==' '||cp=='\t'||cp=='\n') return 15; /* SPACE_SEPARATOR approx */
+    return 0; /* UNASSIGNED */
+}
+
+/* ==================== libcore.util.NativeAllocationRegistry ==================== */
+static void NativeAllocationRegistry_applyFreeFunction(JNIEnv*e,jclass c,jlong freeFunc,jlong ptr) {
+    /* Call the free function pointer if non-null */
+    if (freeFunc != 0 && ptr != 0) {
+        typedef void (*FreeFn)(void*);
+        FreeFn fn = (FreeFn)(intptr_t)freeFunc;
+        fn((void*)(intptr_t)ptr);
+    }
+}
+
 /* Forward declare ohbridge JNI_OnLoad - we call it ourselves since the weak link may not */
 extern jint JNI_OnLoad_ohbridge(JavaVM* vm, void* reserved);
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return -1;
+
+    /* java.lang.Float — must be first (needed by Math.<clinit>) */
+    {
+        jclass cls = (*env)->FindClass(env, "java/lang/Float");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"floatToRawIntBits", "(F)I", (void*)Float_floatToRawIntBits},
+                {"intBitsToFloat", "(I)F", (void*)Float_intBitsToFloat},
+            };
+            registerNativesOrSkip(env, cls, methods, 2);
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+
+    /* java.lang.Double */
+    {
+        jclass cls = (*env)->FindClass(env, "java/lang/Double");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"doubleToRawLongBits", "(D)J", (void*)Double_doubleToRawLongBits},
+                {"longBitsToDouble", "(J)D", (void*)Double_longBitsToDouble},
+            };
+            registerNativesOrSkip(env, cls, methods, 2);
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
 
     /* java.lang.System */
     {
@@ -914,6 +997,39 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"skip0", "(J)J", (void*)FileInputStream_skip0},
                 {"available0", "()I", (void*)FileInputStream_available0},
                 {"close0", "()V", (void*)FileInputStream_close0},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+
+    /* java.lang.Character */
+    {
+        jclass cls = (*env)->FindClass(env, "java/lang/Character");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"isDigitImpl", "(I)Z", (void*)Character_isDigitImpl},
+                {"isUpperCaseImpl", "(I)Z", (void*)Character_isUpperCaseImpl},
+                {"isLowerCaseImpl", "(I)Z", (void*)Character_isLowerCaseImpl},
+                {"isLetterImpl", "(I)Z", (void*)Character_isLetterImpl},
+                {"toUpperCaseImpl", "(I)I", (void*)Character_toUpperCaseImpl},
+                {"toLowerCaseImpl", "(I)I", (void*)Character_toLowerCaseImpl},
+                {"isWhitespaceImpl", "(I)Z", (void*)Character_isWhitespaceImpl},
+                {"isSpaceCharImpl", "(I)Z", (void*)Character_isSpaceCharImpl},
+                {"digitImpl", "(II)I", (void*)Character_digitImpl},
+                {"getTypeImpl", "(I)I", (void*)Character_getTypeImpl},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+
+    /* libcore.util.NativeAllocationRegistry */
+    {
+        jclass cls = (*env)->FindClass(env, "libcore/util/NativeAllocationRegistry");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"applyFreeFunction", "(JJ)V", (void*)NativeAllocationRegistry_applyFreeFunction},
             };
             registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);

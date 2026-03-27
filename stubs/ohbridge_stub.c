@@ -25,8 +25,17 @@
 #define FB_W 480
 #define FB_H 800
 #define FB_PATH "/data/local/tmp/a2oh/framebuffer.raw"
-#define FB_PNG "/sdcard/westlake_frame.png"
-#define TOUCH_PATH "/sdcard/westlake_touch.dat"
+/* Use env vars WESTLAKE_FRAME / WESTLAKE_TOUCH if set */
+static const char* westlake_frame_path() {
+    const char* p = getenv("WESTLAKE_FRAME");
+    return p ? p : "/sdcard/westlake_frame.png";
+}
+static const char* westlake_touch_path() {
+    const char* p = getenv("WESTLAKE_TOUCH");
+    return p ? p : "/sdcard/westlake_touch.dat";
+}
+#define FB_PNG westlake_frame_path()
+#define TOUCH_PATH westlake_touch_path()
 
 static uint32_t* g_fb = NULL;  /* Pixel buffer ARGB */
 static int g_fb_fd = -1;
@@ -680,6 +689,21 @@ static jint OHB_nodeRegisterEvent(JNIEnv*e,jclass c,jlong n,jint ev,jint id) { r
 static void OHB_nodeUnregisterEvent(JNIEnv*e,jclass c,jlong n,jint ev) {}
 static void OHB_dispatchKeyEvent(JNIEnv*e,jclass c,jint action,jint keyCode,jlong downTime) {}
 static jobject OHB_getResumedActivity(JNIEnv*e,jclass c) { return NULL; }
+
+/* ==================== android.graphics.Typeface natives ==================== */
+static void typeface_release_stub(void* ptr) { /* no-op release */ }
+static jlong Typeface_nativeGetReleaseFunc(JNIEnv*e,jclass c) { return (jlong)(intptr_t)typeface_release_stub; }
+static jlong Typeface_nativeCreateFromTypeface(JNIEnv*e,jclass c,jlong ni,jint style) { return ni ? ni : 1; }
+static jlong Typeface_nativeCreateFromTypefaceWithExactStyle(JNIEnv*e,jclass c,jlong ni,jint w,jint it) { return ni ? ni : 1; }
+static jlong Typeface_nativeCreateFromTypefaceWithVariation(JNIEnv*e,jclass c,jlong ni,jobjectArray axes) { return ni ? ni : 1; }
+static jlong Typeface_nativeCreateWeightAlias(JNIEnv*e,jclass c,jlong ni,jint w) { return ni ? ni : 1; }
+static jlong Typeface_nativeCreateFromArray(JNIEnv*e,jclass c,jlongArray arr,jint w,jint it) { return 1; }
+static jintArray Typeface_nativeGetSupportedAxes(JNIEnv*e,jclass c,jlong ni) { return NULL; }
+static void Typeface_nativeSetDefault(JNIEnv*e,jclass c,jlong ptr) {}
+static jint Typeface_nativeGetStyle(JNIEnv*e,jclass c,jlong ptr) { return 0; /* NORMAL */ }
+static jint Typeface_nativeGetWeight(JNIEnv*e,jclass c,jlong ptr) { return 400; /* normal weight */ }
+static void Typeface_nativeRegisterGenericFamily(JNIEnv*e,jclass c,jstring str,jlong ptr) {}
+
 JNIEXPORT jint JNICALL JNI_OnLoad_ohbridge(JavaVM*vm,void*r){
   fprintf(stderr, "[OHBridge] JNI_OnLoad_ohbridge CALLED\n");
   JNIEnv*e; if((*vm)->GetEnv(vm,(void**)&e,JNI_VERSION_1_6)!=JNI_OK)return-1;
@@ -860,4 +884,27 @@ JNIEXPORT jint JNICALL JNI_OnLoad_ohbridge(JavaVM*vm,void*r){
   int n=sizeof(m)/sizeof(m[0]);
   if((*e)->RegisterNatives(e,c,m,n)!=0){(*e)->ExceptionClear(e);
     for(int i=0;i<n;i++){if((*e)->RegisterNatives(e,c,&m[i],1)!=0)(*e)->ExceptionClear(e);}}
-  fprintf(stderr, "[OHBridge ARM64] %d methods\n",n); return JNI_VERSION_1_6;}
+  fprintf(stderr, "[OHBridge ARM64] %d methods\n",n);
+
+  /* Register android.graphics.Typeface natives */
+  jclass tf = (*e)->FindClass(e, "android/graphics/Typeface");
+  if (tf) {
+    JNINativeMethod tfm[] = {
+      {"nativeGetReleaseFunc","()J",(void*)Typeface_nativeGetReleaseFunc},
+      {"nativeCreateFromTypeface","(JI)J",(void*)Typeface_nativeCreateFromTypeface},
+      {"nativeCreateFromTypefaceWithExactStyle","(JII)J",(void*)Typeface_nativeCreateFromTypefaceWithExactStyle},
+      {"nativeCreateFromTypefaceWithVariation","(J[Landroid/graphics/fonts/FontVariationAxis;)J",(void*)Typeface_nativeCreateFromTypefaceWithVariation},
+      {"nativeCreateWeightAlias","(JI)J",(void*)Typeface_nativeCreateWeightAlias},
+      {"nativeCreateFromArray","([JII)J",(void*)Typeface_nativeCreateFromArray},
+      {"nativeGetSupportedAxes","(J)[I",(void*)Typeface_nativeGetSupportedAxes},
+      {"nativeSetDefault","(J)V",(void*)Typeface_nativeSetDefault},
+      {"nativeGetStyle","(J)I",(void*)Typeface_nativeGetStyle},
+      {"nativeGetWeight","(J)I",(void*)Typeface_nativeGetWeight},
+      {"nativeRegisterGenericFamily","(Ljava/lang/String;J)V",(void*)Typeface_nativeRegisterGenericFamily},
+    };
+    int tfn = sizeof(tfm)/sizeof(tfm[0]);
+    for(int i=0;i<tfn;i++){if((*e)->RegisterNatives(e,tf,&tfm[i],1)!=0)(*e)->ExceptionClear(e);}
+    fprintf(stderr, "[OHBridge ARM64] Typeface: %d natives registered\n", tfn);
+  }
+
+  return JNI_VERSION_1_6;}
