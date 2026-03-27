@@ -707,7 +707,7 @@ static void OHB_canvasDrawText(JNIEnv*e,jclass c,jlong cn,jstring js,jfloat x,jf
     else if (brush > 0 && brush < 64) col = g_brushes[brush].color;
     float sz = 16;
     if (font > 0 && font < 32) sz = g_fonts[font].size;
-    if (sz < 20) sz = 20; /* minimum readable size on 480x800 */
+    if (sz < 8) sz = 8; /* minimum readable size */
 
     if (g_use_dlist) {
         uint16_t len = (uint16_t)strlen(s);
