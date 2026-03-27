@@ -47,16 +47,63 @@ static int g_fb_w = FB_W, g_fb_h = FB_H;
 #define WLK_FRAME_SIZE (FB_W * FB_H * 4)
 #define WLK_TOTAL_SIZE (WLK_HEADER_SIZE + 2 * WLK_FRAME_SIZE)
 
+/* ── Display list mode ── */
+#define DLIST_MAX_SIZE (512 * 1024)  /* 512KB max display list */
+#define WLK_DLIST_TOTAL_SIZE (WLK_HEADER_SIZE + DLIST_MAX_SIZE + 64) /* header + dlist + touch */
+
+/* Display list op codes */
+#define OP_DRAW_COLOR      1  /* color:u32 */
+#define OP_DRAW_RECT       2  /* l:f32, t:f32, r:f32, b:f32, color:u32 */
+#define OP_DRAW_TEXT       3  /* x:f32, y:f32, size:f32, color:u32, len:u16, chars[] */
+#define OP_DRAW_LINE       4  /* x1:f32, y1:f32, x2:f32, y2:f32, color:u32, width:f32 */
+#define OP_SAVE            5  /* (no args) */
+#define OP_RESTORE         6  /* (no args) */
+#define OP_TRANSLATE       7  /* dx:f32, dy:f32 */
+#define OP_CLIP_RECT       8  /* l:f32, t:f32, r:f32, b:f32 */
+#define OP_DRAW_ROUND_RECT 9  /* l:f32, t:f32, r:f32, b:f32, rx:f32, ry:f32, color:u32 */
+#define OP_DRAW_CIRCLE    10  /* cx:f32, cy:f32, r:f32, color:u32 */
+
 typedef struct {
     uint32_t magic, version, width, height;
-    uint32_t frame_seq, active_buf;
-    uint32_t flags;
-    uint32_t reserved[25];
+    uint32_t frame_seq;
+    union {
+        uint32_t active_buf;         /* version 1: double-buffer index */
+        uint32_t display_list_size;  /* version 2: bytes used in dlist */
+    };
+    uint32_t op_count;               /* version 2: number of ops */
+    uint32_t flags;                  /* bit 0: display list mode */
+    uint32_t reserved[24];
 } wlk_header_t;
 
 static wlk_header_t* g_shm_header = NULL;
 static uint8_t* g_shm_base = NULL;
-static int g_use_shm = 0; /* 1 if shm is active, 0 = fallback to PNG */
+static int g_use_shm = 0;   /* 1 if shm is active, 0 = fallback to PNG */
+static int g_use_dlist = 0;  /* 1 if display list mode (version=2) */
+
+/* Display list recording state */
+static uint8_t* g_dlist_buf = NULL;  /* points into shm at offset WLK_HEADER_SIZE */
+static uint32_t g_dlist_pos = 0;     /* current write position in dlist buffer */
+static uint32_t g_dlist_ops = 0;     /* op count for current frame */
+
+/* Display list buffer helpers */
+static inline int dlist_room(uint32_t needed) {
+    return g_dlist_pos + needed <= DLIST_MAX_SIZE;
+}
+static inline void dlist_put_u8(uint8_t v) {
+    g_dlist_buf[g_dlist_pos++] = v;
+}
+static inline void dlist_put_u32(uint32_t v) {
+    memcpy(g_dlist_buf + g_dlist_pos, &v, 4);
+    g_dlist_pos += 4;
+}
+static inline void dlist_put_f32(float v) {
+    memcpy(g_dlist_buf + g_dlist_pos, &v, 4);
+    g_dlist_pos += 4;
+}
+static inline void dlist_put_u16(uint16_t v) {
+    memcpy(g_dlist_buf + g_dlist_pos, &v, 2);
+    g_dlist_pos += 2;
+}
 
 /* stb_truetype font */
 static stbtt_fontinfo g_stb_font;
@@ -95,17 +142,23 @@ static int shm_init(void) {
     const char* path = getenv("WESTLAKE_SHM");
     if (!path) return 0;
 
+    /* Check if display list mode is requested */
+    const char* dlist_env = getenv("WESTLAKE_DLIST");
+    int want_dlist = (dlist_env && dlist_env[0] == '1');
+
+    int total_size = want_dlist ? WLK_DLIST_TOTAL_SIZE : WLK_TOTAL_SIZE;
+
     int fd = open(path, O_RDWR | O_CREAT, 0666);
     if (fd < 0) {
         fprintf(stderr, "[OHBridge] shm_init: open(%s) failed\n", path);
         return 0;
     }
-    if (ftruncate(fd, WLK_TOTAL_SIZE) < 0) {
+    if (ftruncate(fd, total_size) < 0) {
         fprintf(stderr, "[OHBridge] shm_init: ftruncate failed\n");
         close(fd);
         return 0;
     }
-    void* map = mmap(NULL, WLK_TOTAL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    void* map = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd); /* fd no longer needed after mmap */
     if (map == MAP_FAILED) {
         fprintf(stderr, "[OHBridge] shm_init: mmap failed\n");
@@ -118,18 +171,43 @@ static int shm_init(void) {
     /* Initialize header */
     memset(g_shm_header, 0, WLK_HEADER_SIZE);
     g_shm_header->magic = WLK_MAGIC;
-    g_shm_header->version = 1;
     g_shm_header->width = FB_W;
     g_shm_header->height = FB_H;
     g_shm_header->frame_seq = 0;
-    g_shm_header->active_buf = 0;
 
-    /* Point g_fb to buffer 0 (the initial back buffer for drawing) */
-    g_fb = (uint32_t*)(g_shm_base + WLK_HEADER_SIZE);
-    memset(g_fb, 0, WLK_FRAME_SIZE);
+    if (want_dlist) {
+        /* Display list mode */
+        g_shm_header->version = 2;
+        g_shm_header->flags = 1; /* bit 0 = display list mode */
+        g_shm_header->display_list_size = 0;
+        g_shm_header->op_count = 0;
 
-    g_use_shm = 1;
-    fprintf(stderr, "[OHBridge] shm_init: OK, path=%s, total=%d bytes\n", path, WLK_TOTAL_SIZE);
+        g_dlist_buf = g_shm_base + WLK_HEADER_SIZE;
+        g_dlist_pos = 0;
+        g_dlist_ops = 0;
+        memset(g_dlist_buf, 0, DLIST_MAX_SIZE);
+
+        /* g_fb still needed for fallback pixel ops and font measurement;
+           allocate a scratch buffer (not in shm) */
+        g_fb = (uint32_t*)calloc(FB_W * FB_H, 4);
+
+        g_use_dlist = 1;
+        g_use_shm = 1;
+        fprintf(stderr, "[OHBridge] shm_init: DLIST mode, path=%s, total=%d bytes\n", path, total_size);
+    } else {
+        /* Pixel buffer double-buffer mode (version 1) */
+        g_shm_header->version = 1;
+        g_shm_header->active_buf = 0;
+        g_shm_header->flags = 0;
+
+        /* Point g_fb to buffer 0 (the initial back buffer for drawing) */
+        g_fb = (uint32_t*)(g_shm_base + WLK_HEADER_SIZE);
+        memset(g_fb, 0, WLK_FRAME_SIZE);
+
+        g_use_dlist = 0;
+        g_use_shm = 1;
+        fprintf(stderr, "[OHBridge] shm_init: PIXEL mode, path=%s, total=%d bytes\n", path, WLK_TOTAL_SIZE);
+    }
     return 1;
 }
 
@@ -437,9 +515,24 @@ static int g_flush_fd = -1;
 static int g_has_content = 0;
 static int g_png_written = 0;
 static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
-    if (!g_fb) return -1;
+    if (!g_fb && !g_use_dlist) return -1;
 
-    /* ── Shared-memory double-buffer path ── */
+    /* ── Display list mode ── */
+    if (g_use_dlist) {
+        /* Publish: write size + op_count, then bump frame_seq */
+        __sync_synchronize();
+        g_shm_header->display_list_size = g_dlist_pos;
+        g_shm_header->op_count = g_dlist_ops;
+        __sync_synchronize();
+        g_shm_header->frame_seq++;
+
+        /* Reset for next frame */
+        g_dlist_pos = 0;
+        g_dlist_ops = 0;
+        return 0;
+    }
+
+    /* ── Shared-memory double-buffer path (version 1) ── */
     if (g_use_shm) {
         /* Back buffer = the one NOT currently being displayed */
         int back = 1 - g_shm_header->active_buf;
@@ -515,43 +608,99 @@ static jlong OHB_canvasCreate(JNIEnv*e,jclass c,jlong bmp) { return 1; }
 static void OHB_canvasDestroy(JNIEnv*e,jclass c,jlong cn) {}
 
 static void OHB_canvasDrawColor(JNIEnv*e,jclass c,jlong cn,jint color) {
+    if (g_use_dlist) {
+        if (!dlist_room(1 + 4)) return;
+        dlist_put_u8(OP_DRAW_COLOR);
+        dlist_put_u32((uint32_t)color);
+        g_dlist_ops++;
+        return;
+    }
     if (!g_fb) return;
     uint32_t col = (uint32_t)color;
     for (int i = 0; i < g_fb_w * g_fb_h; i++) g_fb[i] = col;
 }
 
 static void OHB_canvasDrawRect(JNIEnv*e,jclass c,jlong cn,jfloat l,jfloat t,jfloat r,jfloat b,jlong pen,jlong brush) {
-    if (!g_fb) return;
     uint32_t col = 0xFF000000;
     if (brush > 0 && brush < 64) col = g_brushes[brush].color;
     else if (pen > 0 && pen < 64) col = g_pens[pen].color;
+    if (g_use_dlist) {
+        /* Coords are raw — replay side applies transform via save/translate/restore */
+        if (!dlist_room(1 + 4*4 + 4)) return;
+        dlist_put_u8(OP_DRAW_RECT);
+        dlist_put_f32(l);
+        dlist_put_f32(t);
+        dlist_put_f32(r);
+        dlist_put_f32(b);
+        dlist_put_u32(col);
+        g_dlist_ops++;
+        return;
+    }
+    if (!g_fb) return;
     draw_rect_fill((int)(l+g_tx),(int)(t+g_ty),(int)(r+g_tx),(int)(b+g_ty), col);
 }
 
 static void OHB_canvasDrawRoundRect(JNIEnv*e,jclass c,jlong cn,jfloat l,jfloat t,jfloat r,jfloat b,jfloat rx,jfloat ry,jlong pen,jlong brush) {
-    if (!g_fb) return;
     uint32_t col = 0xFF000000;
     if (brush > 0 && brush < 64) col = g_brushes[brush].color;
     else if (pen > 0 && pen < 64) col = g_pens[pen].color;
+    if (g_use_dlist) {
+        if (!dlist_room(1 + 6*4 + 4)) return;
+        dlist_put_u8(OP_DRAW_ROUND_RECT);
+        dlist_put_f32(l);
+        dlist_put_f32(t);
+        dlist_put_f32(r);
+        dlist_put_f32(b);
+        dlist_put_f32(rx);
+        dlist_put_f32(ry);
+        dlist_put_u32(col);
+        g_dlist_ops++;
+        return;
+    }
+    if (!g_fb) return;
     draw_round_rect((int)(l+g_tx),(int)(t+g_ty),(int)(r+g_tx),(int)(b+g_ty),(int)rx,(int)ry, col);
 }
 
 static void OHB_canvasDrawCircle(JNIEnv*e,jclass c,jlong cn,jfloat cx,jfloat cy,jfloat r,jlong pen,jlong brush) {
-    if (!g_fb) return;
     uint32_t col = 0xFF000000;
     if (brush > 0 && brush < 64) col = g_brushes[brush].color;
+    else if (pen > 0 && pen < 64) col = g_pens[pen].color;
+    if (g_use_dlist) {
+        if (!dlist_room(1 + 3*4 + 4)) return;
+        dlist_put_u8(OP_DRAW_CIRCLE);
+        dlist_put_f32(cx);
+        dlist_put_f32(cy);
+        dlist_put_f32(r);
+        dlist_put_u32(col);
+        g_dlist_ops++;
+        return;
+    }
+    if (!g_fb) return;
     draw_circle((int)(cx+g_tx),(int)(cy+g_ty),(int)r, col, 1);
 }
 
 static void OHB_canvasDrawLine(JNIEnv*e,jclass c,jlong cn,jfloat x1,jfloat y1,jfloat x2,jfloat y2,jlong pen) {
-    if (!g_fb) return;
     uint32_t col = 0xFF000000;
-    if (pen > 0 && pen < 64) col = g_pens[pen].color;
+    float width = 1.0f;
+    if (pen > 0 && pen < 64) { col = g_pens[pen].color; width = g_pens[pen].width; }
+    if (g_use_dlist) {
+        if (!dlist_room(1 + 4*4 + 4 + 4)) return;
+        dlist_put_u8(OP_DRAW_LINE);
+        dlist_put_f32(x1);
+        dlist_put_f32(y1);
+        dlist_put_f32(x2);
+        dlist_put_f32(y2);
+        dlist_put_u32(col);
+        dlist_put_f32(width);
+        g_dlist_ops++;
+        return;
+    }
+    if (!g_fb) return;
     draw_line((int)(x1+g_tx),(int)(y1+g_ty),(int)(x2+g_tx),(int)(y2+g_ty), col);
 }
 
 static void OHB_canvasDrawText(JNIEnv*e,jclass c,jlong cn,jstring js,jfloat x,jfloat y,jlong font,jlong pen,jlong brush) {
-    if (!g_fb || !js) return;
+    if (!js) return;
     const char* s = (*e)->GetStringUTFChars(e, js, 0);
     uint32_t col = 0xFF000000;
     if (pen > 0 && pen < 64) col = g_pens[pen].color;
@@ -559,6 +708,27 @@ static void OHB_canvasDrawText(JNIEnv*e,jclass c,jlong cn,jstring js,jfloat x,jf
     float sz = 16;
     if (font > 0 && font < 32) sz = g_fonts[font].size;
     if (sz < 20) sz = 20; /* minimum readable size on 480x800 */
+
+    if (g_use_dlist) {
+        uint16_t len = (uint16_t)strlen(s);
+        if (len > 4096) len = 4096; /* safety cap */
+        if (!dlist_room(1 + 3*4 + 4 + 2 + len)) {
+            (*e)->ReleaseStringUTFChars(e, js, s);
+            return;
+        }
+        dlist_put_u8(OP_DRAW_TEXT);
+        dlist_put_f32(x);
+        dlist_put_f32(y);
+        dlist_put_f32(sz);
+        dlist_put_u32(col);
+        dlist_put_u16(len);
+        memcpy(g_dlist_buf + g_dlist_pos, s, len);
+        g_dlist_pos += len;
+        g_dlist_ops++;
+        (*e)->ReleaseStringUTFChars(e, js, s);
+        return;
+    }
+    if (!g_fb) { (*e)->ReleaseStringUTFChars(e, js, s); return; }
     if (g_font_loaded) {
         draw_text_stb(s, (int)(x+g_tx), (int)(y+g_ty), col, sz);
     } else {
@@ -569,6 +739,10 @@ static void OHB_canvasDrawText(JNIEnv*e,jclass c,jlong cn,jstring js,jfloat x,jf
 }
 
 static void OHB_canvasSave(JNIEnv*e,jclass c,jlong cn) {
+    if (g_use_dlist) {
+        if (dlist_room(1)) { dlist_put_u8(OP_SAVE); g_dlist_ops++; }
+    }
+    /* Always maintain local state too (needed for translate accumulation) */
     if (g_state_top < MAX_SAVE) {
         g_states[g_state_top].tx = g_tx;
         g_states[g_state_top].ty = g_ty;
@@ -576,16 +750,39 @@ static void OHB_canvasSave(JNIEnv*e,jclass c,jlong cn) {
     }
 }
 static void OHB_canvasRestore(JNIEnv*e,jclass c,jlong cn) {
+    if (g_use_dlist) {
+        if (dlist_room(1)) { dlist_put_u8(OP_RESTORE); g_dlist_ops++; }
+    }
     if (g_state_top > 0) {
         g_state_top--;
         g_tx = g_states[g_state_top].tx;
         g_ty = g_states[g_state_top].ty;
     }
 }
-static void OHB_canvasTranslate(JNIEnv*e,jclass c,jlong cn,jfloat dx,jfloat dy) { g_tx+=dx; g_ty+=dy; }
+static void OHB_canvasTranslate(JNIEnv*e,jclass c,jlong cn,jfloat dx,jfloat dy) {
+    if (g_use_dlist) {
+        if (dlist_room(1 + 2*4)) {
+            dlist_put_u8(OP_TRANSLATE);
+            dlist_put_f32(dx);
+            dlist_put_f32(dy);
+            g_dlist_ops++;
+        }
+    }
+    g_tx+=dx; g_ty+=dy;
+}
 static void OHB_canvasScale(JNIEnv*e,jclass c,jlong cn,jfloat sx,jfloat sy) {}
 static void OHB_canvasRotate(JNIEnv*e,jclass c,jlong cn,jfloat deg,jfloat px,jfloat py) {}
-static void OHB_canvasClipRect(JNIEnv*e,jclass c,jlong cn,jfloat l,jfloat t,jfloat r,jfloat b) {}
+static void OHB_canvasClipRect(JNIEnv*e,jclass c,jlong cn,jfloat l,jfloat t,jfloat r,jfloat b) {
+    if (g_use_dlist) {
+        if (!dlist_room(1 + 4*4)) return;
+        dlist_put_u8(OP_CLIP_RECT);
+        dlist_put_f32(l);
+        dlist_put_f32(t);
+        dlist_put_f32(r);
+        dlist_put_f32(b);
+        g_dlist_ops++;
+    }
+}
 static void OHB_canvasClipPath(JNIEnv*e,jclass c,jlong cn,jlong p) {}
 static void OHB_canvasConcat(JNIEnv*e,jclass c,jlong cn,jfloatArray m) {}
 static void OHB_canvasDrawOval(JNIEnv*e,jclass c,jlong cn,jfloat l,jfloat t,jfloat r,jfloat b,jlong pen,jlong brush) {}
