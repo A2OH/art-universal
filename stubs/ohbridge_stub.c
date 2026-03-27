@@ -41,6 +41,23 @@ static uint32_t* g_fb = NULL;  /* Pixel buffer ARGB */
 static int g_fb_fd = -1;
 static int g_fb_w = FB_W, g_fb_h = FB_H;
 
+/* ── Shared memory double-buffered rendering ── */
+#define WLK_MAGIC 0x574C4B46
+#define WLK_HEADER_SIZE 128
+#define WLK_FRAME_SIZE (FB_W * FB_H * 4)
+#define WLK_TOTAL_SIZE (WLK_HEADER_SIZE + 2 * WLK_FRAME_SIZE)
+
+typedef struct {
+    uint32_t magic, version, width, height;
+    uint32_t frame_seq, active_buf;
+    uint32_t flags;
+    uint32_t reserved[25];
+} wlk_header_t;
+
+static wlk_header_t* g_shm_header = NULL;
+static uint8_t* g_shm_base = NULL;
+static int g_use_shm = 0; /* 1 if shm is active, 0 = fallback to PNG */
+
 /* stb_truetype font */
 static stbtt_fontinfo g_stb_font;
 static unsigned char* g_font_data = NULL;
@@ -72,6 +89,48 @@ static void font_init(void) {
         free(g_font_data); g_font_data = NULL;
     }
     fprintf(stderr, "[OHBridge] No TTF font found, using bitmap font\n");
+}
+
+static int shm_init(void) {
+    const char* path = getenv("WESTLAKE_SHM");
+    if (!path) return 0;
+
+    int fd = open(path, O_RDWR | O_CREAT, 0666);
+    if (fd < 0) {
+        fprintf(stderr, "[OHBridge] shm_init: open(%s) failed\n", path);
+        return 0;
+    }
+    if (ftruncate(fd, WLK_TOTAL_SIZE) < 0) {
+        fprintf(stderr, "[OHBridge] shm_init: ftruncate failed\n");
+        close(fd);
+        return 0;
+    }
+    void* map = mmap(NULL, WLK_TOTAL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd); /* fd no longer needed after mmap */
+    if (map == MAP_FAILED) {
+        fprintf(stderr, "[OHBridge] shm_init: mmap failed\n");
+        return 0;
+    }
+
+    g_shm_base = (uint8_t*)map;
+    g_shm_header = (wlk_header_t*)g_shm_base;
+
+    /* Initialize header */
+    memset(g_shm_header, 0, WLK_HEADER_SIZE);
+    g_shm_header->magic = WLK_MAGIC;
+    g_shm_header->version = 1;
+    g_shm_header->width = FB_W;
+    g_shm_header->height = FB_H;
+    g_shm_header->frame_seq = 0;
+    g_shm_header->active_buf = 0;
+
+    /* Point g_fb to buffer 0 (the initial back buffer for drawing) */
+    g_fb = (uint32_t*)(g_shm_base + WLK_HEADER_SIZE);
+    memset(g_fb, 0, WLK_FRAME_SIZE);
+
+    g_use_shm = 1;
+    fprintf(stderr, "[OHBridge] shm_init: OK, path=%s, total=%d bytes\n", path, WLK_TOTAL_SIZE);
+    return 1;
 }
 
 static void fb_init(void) {
@@ -360,7 +419,15 @@ static void OHB_logError(JNIEnv*e,jclass c,jstring t,jstring m){
 }
 
 /* Canvas */
-static jint OHB_arkuiInit(JNIEnv*e,jclass c) { fb_init(); return 0; }
+static jint OHB_arkuiInit(JNIEnv*e,jclass c) {
+    if (!shm_init()) {
+        fb_init(); /* fallback to malloc + PNG path */
+    } else {
+        font_init(); /* shm_init sets g_fb, still need fonts */
+        g_fb_fd = 1; /* flag: initialized */
+    }
+    return 0;
+}
 
 static jlong OHB_surfaceCreate(JNIEnv*e,jclass c,jlong unused,jint w,jint h) {
     g_fb_w = w; g_fb_h = h; fb_init(); return 1;
@@ -371,6 +438,40 @@ static int g_has_content = 0;
 static int g_png_written = 0;
 static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
     if (!g_fb) return -1;
+
+    /* ── Shared-memory double-buffer path ── */
+    if (g_use_shm) {
+        /* Back buffer = the one NOT currently being displayed */
+        int back = 1 - g_shm_header->active_buf;
+        uint8_t* dst = g_shm_base + WLK_HEADER_SIZE + back * WLK_FRAME_SIZE;
+
+        /* Copy with R/B swap: internal 0xAARRGGBB → Android 0xAABBGGRR */
+        int npix = g_fb_w * g_fb_h;
+        const uint32_t* src = g_fb;
+        uint32_t* dst32 = (uint32_t*)dst;
+        for (int i = 0; i < npix; i++) {
+            uint32_t p = src[i];
+            uint32_t a = p & 0xFF000000;
+            uint32_t r = (p >> 16) & 0xFF;
+            uint32_t g = (p >> 8) & 0xFF;
+            uint32_t b = p & 0xFF;
+            dst32[i] = a | (b << 16) | (g << 8) | r;
+        }
+
+        /* Flip: make back buffer the active (front) buffer */
+        __sync_synchronize(); /* memory barrier before publishing */
+        g_shm_header->active_buf = back;
+        g_shm_header->frame_seq++;
+
+        /* Switch g_fb to the NEW back buffer for next frame's drawing */
+        int new_back = 1 - back;
+        g_fb = (uint32_t*)(g_shm_base + WLK_HEADER_SIZE + new_back * WLK_FRAME_SIZE);
+
+        /* No usleep — let the app control pacing */
+        return 0;
+    }
+
+    /* ── PNG fallback path (unchanged) ── */
     /* Check if frame has any non-background content */
     if (!g_has_content) {
         uint32_t bg = 0xFFF5F5F5;
@@ -402,7 +503,6 @@ static jint OHB_surfaceFlush(JNIEnv*e,jclass c,jlong s) {
             }
             stbi_write_png(FB_PNG, g_fb_w, g_fb_h, 4, rgba, g_fb_w * 4);
             free(rgba);
-            
         }
     }
     usleep(33000);
