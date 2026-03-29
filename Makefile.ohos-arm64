@@ -29,7 +29,7 @@ TARGET_FLAGS = --target=aarch64-linux-ohos \
   -fuse-ld=lld \
   --rtlib=compiler-rt
 
-CXXFLAGS = -std=c++17 -O2 -w -fPIC -DNDEBUG \
+CXXFLAGS = -std=c++17 -O2 -w -fPIC -DNDEBUG -DART_STATIC_JIT \
   $(TARGET_FLAGS) \
   -include $(STUBS)/art_ohos_compat.h \
   -Wno-attributes \
@@ -470,6 +470,8 @@ link-runtime: all ziparchive sigchain nativehelper dalvikvm-main fault-handler-s
 	  -Wl,--unresolved-symbols=ignore-in-object-files \
 	  $(BUILDDIR)/dalvikvm/dalvikvm.o \
 	  $$(find $(BUILDDIR)/nativehelper -name '*.o') \
+	  $$(find $(BUILDDIR)/compiler -name '*.o') \
+	  $$(find $(BUILDDIR)/dex2oat -name '*.o' ! -name 'dex2oat.o' ! -name 'dex2oat_options.o') \
 	  $$(find $(BUILDDIR)/runtime -name '*.o') \
 	  $$(find $(BUILDDIR)/libdexfile -name '*.o') \
 	  $$(find $(BUILDDIR)/libartbase -name '*.o') \
