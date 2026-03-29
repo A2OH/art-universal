@@ -198,6 +198,18 @@ ELFFILE_OBJS = $(patsubst $(ART)/%.cc,$(BUILDDIR)/%.o,$(ELFFILE_SRCS))
 PROFILE_SRCS = $(filter-out %_test.cc,$(wildcard $(ART)/libprofile/profile/*.cc))
 PROFILE_OBJS = $(patsubst $(ART)/%.cc,$(BUILDDIR)/%.o,$(PROFILE_SRCS))
 
+# ============ dex2oat ============
+DEX2OAT_SRCS = $(filter-out %_test.cc %_fuzzer.cc,$(wildcard \
+  $(ART)/dex2oat/*.cc \
+  $(ART)/dex2oat/dex/*.cc \
+  $(ART)/dex2oat/driver/*.cc \
+  $(ART)/dex2oat/linker/*.cc \
+  $(ART)/dex2oat/linker/arm/*.cc \
+  $(ART)/dex2oat/linker/arm64/*.cc \
+  $(ART)/dex2oat/linker/x86/*.cc \
+  $(ART)/dex2oat/linker/x86_64/*.cc))
+DEX2OAT_OBJS = $(patsubst $(ART)/%.cc,$(BUILDDIR)/%.o,$(DEX2OAT_SRCS))
+
 # ============ VIXL (ARM assembler) ============
 VIXL_SRCS = $(filter-out %_test.cc %test-runner.cc,$(wildcard \
   $(AOSP)/external/vixl/src/*.cc \
@@ -246,7 +258,7 @@ ASM_INCLUDES = -I$(STUBS) \
 # ============ targets ============
 .PHONY: all libdexfile libartbase libcompiler runtime dexlayout libelffile libprofile vixl android-base link-stubs asm link-runtime nativehelper dalvikvm-main clean status
 
-all: libdexfile libartbase libcompiler runtime dexlayout libelffile libprofile vixl android-base link-stubs asm
+all: libdexfile libartbase libcompiler runtime dexlayout libelffile libprofile vixl android-base link-stubs asm dex2oat-objs
 
 libdexfile: $(DEXFILE_OBJS)
 	@echo "=== libdexfile (ARM64) ==="
@@ -417,6 +429,36 @@ jni-stubs:
 	    -DJNI_OnLoad=JNI_OnLoad_ohbridge \
 	    -c $(STUBS)/ohbridge_stub.c \
 	    -o $(BUILDDIR)/jni_stubs/ohbridge_stub.o 2>&1 && echo "OK: ohbridge_stub.c" || echo "FAIL: ohbridge_stub.c"
+
+dex2oat-objs: $(DEX2OAT_OBJS)
+
+link-dex2oat: all ziparchive sigchain fault-handler-stubs template-instantiations
+	@mkdir -p $(BUILDDIR)/bin
+	$(CXX) $(TARGET_FLAGS) -static -o $(BUILDDIR)/bin/dex2oat \
+	  -rdynamic -Wl,--unresolved-symbols=ignore-in-object-files \
+	  $$(find $(BUILDDIR)/dex2oat -name '*.o') \
+	  $$(find $(BUILDDIR)/compiler -name '*.o') \
+	  $$(find $(BUILDDIR)/runtime -name '*.o') \
+	  $$(find $(BUILDDIR)/libdexfile -name '*.o') \
+	  $$(find $(BUILDDIR)/libartbase -name '*.o') \
+	  $$(find $(BUILDDIR)/libelffile -name '*.o') \
+	  $$(find $(BUILDDIR)/libprofile -name '*.o') \
+	  $$(find $(BUILDDIR)/dexlayout -name '*.o') \
+	  $$(find $(BUILDDIR)/vixl -name '*.o') \
+	  $$(find $(BUILDDIR)/android-base -name '*.o') \
+	  $$(find $(BUILDDIR)/ziparchive -name '*.o') \
+	  $(BUILDDIR)/sigchain/sigchain.o \
+	  $(ASM_QUICK) $(ASM_JNI) $(ASM_MEMCMP) \
+	  $(STUBS_OBJ) \
+	  $(BUILDDIR)/stubs/fault_handler_stubs.o \
+	  $(BUILDDIR)/stubs/template_instantiations.o \
+	  $(OHOS_SYSROOT)/usr/lib/libc++.a \
+	  $(OHOS_SYSROOT)/usr/lib/libc++abi.a \
+	  $(OHOS_SYSROOT)/usr/lib/libz.a \
+	  -lpthread -ldl -lm
+	@echo "Built: $(BUILDDIR)/bin/dex2oat"
+	@ls -lh $(BUILDDIR)/bin/dex2oat
+	@file $(BUILDDIR)/bin/dex2oat
 
 link-runtime: all ziparchive sigchain nativehelper dalvikvm-main fault-handler-stubs template-instantiations jni-stubs
 	@echo "=== Linking dalvikvm (ARM64, static) ==="
