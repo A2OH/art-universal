@@ -1517,5 +1517,12 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     }
 
     /* OHBridge registered later via Runtime_nativeLoad when System.loadLibrary is called */
+
+    /* Clear any pending exceptions from failed RegisterNatives calls
+       (speed boot image compiles some methods as intrinsics, making them non-native) */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
+
     return JNI_VERSION_1_6;
 }
