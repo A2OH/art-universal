@@ -792,6 +792,8 @@ static void ZipFile_releaseInflater(JNIEnv* env, jobject thiz, jobject inflater)
 static jobject ZipFile_getZipEntry(JNIEnv* env, jobject thiz, jstring name, jlong entry) { return NULL; }
 
 /* startsWithLOC - check if ZIP starts with local file header */
+static void ZipFile_freeEntry(JNIEnv* env, jclass cls, jlong handle, jlong entry) { /* no-op: entries are in mmap'd zip */ }
+
 static jboolean ZipFile_startsWithLOC(JNIEnv* env, jclass cls, jlong handle) {
     NativeZipFile* zf = (NativeZipFile*)(uintptr_t)handle;
     if (!zf || zf->size < 4) return JNI_FALSE;
@@ -871,6 +873,18 @@ static void NativeAllocationRegistry_applyFreeFunction(JNIEnv*e,jclass c,jlong f
         fn((void*)(intptr_t)ptr);
     }
 }
+
+/* ==================== android.graphics.Typeface stubs ==================== */
+static jlong Typeface_nativeGetReleaseFunc(JNIEnv* env, jclass cls) { return 0; }
+static jlong Typeface_nativeCreateFromTypeface(JNIEnv* env, jclass cls, jlong ni, jint style) { return ni ? ni : 1; }
+static jlong Typeface_nativeCreateFromTypefaceWithExactStyle(JNIEnv* env, jclass cls, jlong ni, jint weight, jboolean italic) { return ni ? ni : 1; }
+static jlong Typeface_nativeCreateWeightAlias(JNIEnv* env, jclass cls, jlong ni, jint weight) { return ni ? ni : 1; }
+static jlong Typeface_nativeCreateFromArray(JNIEnv* env, jclass cls, jlongArray familyArray, jint weight, jint italic) { return 1; }
+static jintArray Typeface_nativeGetSupportedAxes(JNIEnv* env, jclass cls, jlong ni) { return NULL; }
+static void Typeface_nativeSetDefault(JNIEnv* env, jclass cls, jlong nativePtr) {}
+static jint Typeface_nativeGetStyle(JNIEnv* env, jclass cls, jlong nativePtr) { return 0; /* NORMAL */ }
+static jint Typeface_nativeGetWeight(JNIEnv* env, jclass cls, jlong nativePtr) { return 400; /* regular */ }
+static void Typeface_nativeRegisterGenericFamily(JNIEnv* env, jclass cls, jstring str, jlong nativePtr) {}
 
 /* Forward declare ohbridge JNI_OnLoad - we call it ourselves since the weak link may not */
 extern jint JNI_OnLoad_ohbridge(JavaVM* vm, void* reserved);
@@ -1097,6 +1111,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"getFileDescriptor", "(J)I", (void*)ZipFile_getFileDescriptor},
                 {"getCommentBytes", "(J)[B", (void*)ZipFile_getCommentBytes},
                 {"read", "(JJJ[BII)I", (void*)ZipFile_read},
+                {"freeEntry", "(JJ)V", (void*)ZipFile_freeEntry},
                 {"startsWithLOC", "(J)Z", (void*)ZipFile_startsWithLOC},
                 {"ensureOpen", "()V", (void*)ZipFile_ensureOpen},
             };
@@ -1153,6 +1168,27 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
             (*env)->DeleteLocalRef(env, cls);
         }
     }
+    /* android.graphics.Typeface — needed before any View rendering */
+    {
+        jclass cls = (*env)->FindClass(env, "android/graphics/Typeface");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"nativeGetReleaseFunc", "()J", (void*)Typeface_nativeGetReleaseFunc},
+                {"nativeCreateFromTypeface", "(JI)J", (void*)Typeface_nativeCreateFromTypeface},
+                {"nativeCreateFromTypefaceWithExactStyle", "(JIZ)J", (void*)Typeface_nativeCreateFromTypefaceWithExactStyle},
+                {"nativeCreateWeightAlias", "(JI)J", (void*)Typeface_nativeCreateWeightAlias},
+                {"nativeCreateFromArray", "([JII)J", (void*)Typeface_nativeCreateFromArray},
+                {"nativeGetSupportedAxes", "(J)[I", (void*)Typeface_nativeGetSupportedAxes},
+                {"nativeSetDefault", "(J)V", (void*)Typeface_nativeSetDefault},
+                {"nativeGetStyle", "(J)I", (void*)Typeface_nativeGetStyle},
+                {"nativeGetWeight", "(J)I", (void*)Typeface_nativeGetWeight},
+                {"nativeRegisterGenericFamily", "(Ljava/lang/String;J)V", (void*)Typeface_nativeRegisterGenericFamily},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+
     /* OHBridge registered later via Runtime_nativeLoad when System.loadLibrary is called */
     return JNI_VERSION_1_6;
 }
