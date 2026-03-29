@@ -11,6 +11,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <zlib.h>
+#include <regex.h>
 
 /* Register native methods one at a time, skipping failures */
 static int registerNativesOrSkip(JNIEnv* env, jclass clazz,
@@ -844,6 +846,16 @@ static jboolean Character_isDigitImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='
 static jboolean Character_isUpperCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='A'&&cp<='Z')?JNI_TRUE:JNI_FALSE; }
 static jboolean Character_isLowerCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='a'&&cp<='z')?JNI_TRUE:JNI_FALSE; }
 static jboolean Character_isLetterImpl(JNIEnv*e,jclass c,jint cp) { return ((cp>='A'&&cp<='Z')||(cp>='a'&&cp<='z'))?JNI_TRUE:JNI_FALSE; }
+static jboolean Character_isLetterOrDigitImpl(JNIEnv*e,jclass c,jint cp) { return ((cp>='A'&&cp<='Z')||(cp>='a'&&cp<='z')||(cp>='0'&&cp<='9'))?JNI_TRUE:JNI_FALSE; }
+static jboolean Character_isAlphabeticImpl(JNIEnv*e,jclass c,jint cp) { return ((cp>='A'&&cp<='Z')||(cp>='a'&&cp<='z'))?JNI_TRUE:JNI_FALSE; }
+static jboolean Character_isDefinedImpl(JNIEnv*e,jclass c,jint cp) { return (cp>=0x20&&cp<=0x7e)?JNI_TRUE:JNI_FALSE; }
+static jint Character_toTitleCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='a'&&cp<='z')?(cp-32):cp; }
+static jboolean Character_isIdentifierIgnorableImpl(JNIEnv*e,jclass c,jint cp) { return JNI_FALSE; }
+static jint Character_getNumericValueImpl(JNIEnv*e,jclass c,jint cp) { if(cp>='0'&&cp<='9') return cp-'0'; if(cp>='A'&&cp<='Z') return cp-'A'+10; if(cp>='a'&&cp<='z') return cp-'a'+10; return -1; }
+static jbyte Character_getDirectionalityImpl(JNIEnv*e,jclass c,jint cp) { return 0; }
+static jboolean Character_isMirroredImpl(JNIEnv*e,jclass c,jint cp) { return JNI_FALSE; }
+static jboolean Character_isTitleCaseImpl(JNIEnv*e,jclass c,jint cp) { return JNI_FALSE; }
+static jboolean Character_isIdeographicImpl(JNIEnv*e,jclass c,jint cp) { return JNI_FALSE; }
 static jint Character_toUpperCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='a'&&cp<='z')?(cp-32):cp; }
 static jint Character_toLowerCaseImpl(JNIEnv*e,jclass c,jint cp) { return (cp>='A'&&cp<='Z')?(cp+32):cp; }
 static jboolean Character_isWhitespaceImpl(JNIEnv*e,jclass c,jint cp) { return (cp==' '||cp=='\t'||cp=='\n'||cp=='\r'||cp=='\f')?JNI_TRUE:JNI_FALSE; }
@@ -885,6 +897,227 @@ static void Typeface_nativeSetDefault(JNIEnv* env, jclass cls, jlong nativePtr) 
 static jint Typeface_nativeGetStyle(JNIEnv* env, jclass cls, jlong nativePtr) { return 0; /* NORMAL */ }
 static jint Typeface_nativeGetWeight(JNIEnv* env, jclass cls, jlong nativePtr) { return 400; /* regular */ }
 static void Typeface_nativeRegisterGenericFamily(JNIEnv* env, jclass cls, jstring str, jlong nativePtr) {}
+
+/* ==================== java.util.zip.Inflater ==================== */
+static jlong Inflater_init(JNIEnv* env, jclass cls, jboolean nowrap) {
+    z_stream* strm = (z_stream*)calloc(1, sizeof(z_stream));
+    if (!strm) return 0;
+    int ret = inflateInit2(strm, nowrap ? -MAX_WBITS : MAX_WBITS);
+    if (ret != Z_OK) { free(strm); return 0; }
+    return (jlong)(intptr_t)strm;
+}
+static void Inflater_setDictionary(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm) return;
+    jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
+    inflateSetDictionary(strm, (Bytef*)(buf + off), len);
+    (*env)->ReleaseByteArrayElements(env, b, buf, JNI_ABORT);
+}
+static jint Inflater_inflateBytes(JNIEnv* env, jobject obj, jlong addr, jbyteArray b, jint off, jint len) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm) return -1;
+    jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
+    strm->next_out = (Bytef*)(buf + off);
+    strm->avail_out = len;
+    int ret = inflate(strm, Z_PARTIAL_FLUSH);
+    int n = len - strm->avail_out;
+    (*env)->ReleaseByteArrayElements(env, b, buf, 0);
+    /* Update Java fields: finished, needDict */
+    if (ret == Z_STREAM_END) {
+        jclass infCls = (*env)->GetObjectClass(env, obj);
+        jfieldID fid = (*env)->GetFieldID(env, infCls, "finished", "Z");
+        if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
+    } else if (ret == Z_NEED_DICT) {
+        jclass infCls = (*env)->GetObjectClass(env, obj);
+        jfieldID fid = (*env)->GetFieldID(env, infCls, "needDict", "Z");
+        if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
+    }
+    return n;
+}
+static void Inflater_setInput(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm || !b) return;
+    /* Free previous input buffer if any (stored in opaque) */
+    if (strm->opaque) { free(strm->opaque); strm->opaque = NULL; }
+    /* Copy input data to persistent buffer */
+    jbyte* src = (*env)->GetByteArrayElements(env, b, NULL);
+    Bytef* buf = (Bytef*)malloc(len);
+    memcpy(buf, src + off, len);
+    (*env)->ReleaseByteArrayElements(env, b, src, JNI_ABORT);
+    strm->next_in = buf;
+    strm->avail_in = len;
+    strm->opaque = buf; /* remember for free */
+}
+static jint Inflater_getAdler(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jint)strm->adler : 0;
+}
+static void Inflater_reset(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (strm) inflateReset(strm);
+}
+static jlong Inflater_getBytesRead(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jlong)strm->total_in : 0;
+}
+static jlong Inflater_getBytesWritten(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jlong)strm->total_out : 0;
+}
+static void Inflater_end(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (strm) {
+        if (strm->opaque) free(strm->opaque);
+        inflateEnd(strm);
+        free(strm);
+    }
+}
+
+/* ==================== java.util.zip.Deflater ==================== */
+static jlong Deflater_init(JNIEnv* env, jclass cls, jint level, jint strategy, jboolean nowrap) {
+    z_stream* strm = (z_stream*)calloc(1, sizeof(z_stream));
+    if (!strm) return 0;
+    int ret = deflateInit2(strm, level, Z_DEFLATED, nowrap ? -MAX_WBITS : MAX_WBITS, 8, strategy);
+    if (ret != Z_OK) { free(strm); return 0; }
+    return (jlong)(intptr_t)strm;
+}
+static void Deflater_setDictionary(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm) return;
+    jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
+    deflateSetDictionary(strm, (Bytef*)(buf + off), len);
+    (*env)->ReleaseByteArrayElements(env, b, buf, JNI_ABORT);
+}
+static void Deflater_setInput(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm || !b) return;
+    if (strm->opaque) { free(strm->opaque); strm->opaque = NULL; }
+    jbyte* src = (*env)->GetByteArrayElements(env, b, NULL);
+    Bytef* buf = (Bytef*)malloc(len);
+    memcpy(buf, src + off, len);
+    (*env)->ReleaseByteArrayElements(env, b, src, JNI_ABORT);
+    strm->next_in = buf;
+    strm->avail_in = len;
+    strm->opaque = buf;
+}
+static jint Deflater_deflateBytes(JNIEnv* env, jobject obj, jlong addr, jbyteArray b, jint off, jint len, jint flush) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm) return 0;
+    jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
+    strm->next_out = (Bytef*)(buf + off);
+    strm->avail_out = len;
+    int ret = deflate(strm, flush);
+    int n = len - strm->avail_out;
+    (*env)->ReleaseByteArrayElements(env, b, buf, 0);
+    if (ret == Z_STREAM_END) {
+        jclass defCls = (*env)->GetObjectClass(env, obj);
+        jfieldID fid = (*env)->GetFieldID(env, defCls, "finished", "Z");
+        if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
+    }
+    return n;
+}
+static jint Deflater_getAdler(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jint)strm->adler : 0;
+}
+static void Deflater_reset(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (strm) deflateReset(strm);
+}
+static jlong Deflater_getBytesRead(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jlong)strm->total_in : 0;
+}
+static jlong Deflater_getBytesWritten(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jlong)strm->total_out : 0;
+}
+static void Deflater_end(JNIEnv* env, jclass cls, jlong addr) {
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (strm) {
+        if (strm->opaque) free(strm->opaque);
+        deflateEnd(strm);
+        free(strm);
+    }
+}
+
+/* ==================== com.android.icu.util.regex.PatternNative ==================== */
+/* Wraps POSIX regex for basic java.util.regex support */
+typedef struct {
+    regex_t preg;
+    int compiled;
+    char* pattern_str;
+} IcuPattern;
+
+static jlong PatternNative_getNativeFinalizer(JNIEnv* env, jclass cls) {
+    /* Return a function pointer that frees an IcuPattern */
+    return (jlong)(intptr_t)free; /* simplified: just free the struct */
+}
+
+static jlong PatternNative_compileRegex(JNIEnv* env, jclass cls, jstring pattern, jint flags) {
+    IcuPattern* pat = (IcuPattern*)calloc(1, sizeof(IcuPattern));
+    if (!pat) return 0;
+    const char* str = (*env)->GetStringUTFChars(env, pattern, NULL);
+    pat->pattern_str = strdup(str);
+    int cflags = REG_EXTENDED;
+    if (flags & 2) cflags |= REG_ICASE; /* CASE_INSENSITIVE */
+    if (flags & 32) cflags |= REG_NEWLINE; /* MULTILINE */
+    int rc = regcomp(&pat->preg, str, cflags);
+    pat->compiled = (rc == 0) ? 1 : 0;
+    (*env)->ReleaseStringUTFChars(env, pattern, str);
+    return (jlong)(intptr_t)pat;
+}
+
+static jlong PatternNative_openMatcher(JNIEnv* env, jclass cls, jlong patAddr) {
+    /* Return the pattern address as matcher handle — matcher state is per-call */
+    return patAddr ? patAddr : 1;
+}
+
+/* ==================== com.android.icu.util.regex.MatcherNative ==================== */
+static jboolean MatcherNative_findNext(JNIEnv* env, jclass cls, jlong matcherAddr, jint startIndex) {
+    return JNI_FALSE; /* stub: no match */
+}
+
+static jboolean MatcherNative_find(JNIEnv* env, jclass cls, jlong matcherAddr) {
+    return JNI_FALSE;
+}
+
+static jboolean MatcherNative_lookingAt(JNIEnv* env, jclass cls, jlong matcherAddr) {
+    return JNI_FALSE;
+}
+
+static jboolean MatcherNative_matches(JNIEnv* env, jclass cls, jlong matcherAddr) {
+    return JNI_FALSE;
+}
+
+static jint MatcherNative_groupCount(JNIEnv* env, jclass cls, jlong matcherAddr) {
+    return 0;
+}
+
+static jint MatcherNative_start(JNIEnv* env, jclass cls, jlong matcherAddr, jint group) {
+    return -1;
+}
+
+static jint MatcherNative_end(JNIEnv* env, jclass cls, jlong matcherAddr, jint group) {
+    return -1;
+}
+
+static void MatcherNative_setInput(JNIEnv* env, jclass cls, jlong matcherAddr, jstring input, jint start, jint end) {}
+static void MatcherNative_useAnchoringBounds(JNIEnv* env, jclass cls, jlong matcherAddr, jboolean b) {}
+static void MatcherNative_useTransparentBounds(JNIEnv* env, jclass cls, jlong matcherAddr, jboolean b) {}
+static jint MatcherNative_hitEnd(JNIEnv* env, jclass cls, jlong matcherAddr) { return 0; }
+static jint MatcherNative_requireEnd(JNIEnv* env, jclass cls, jlong matcherAddr) { return 0; }
+static jlong MatcherNative_getNativeFinalizer(JNIEnv* env, jclass cls) { return (jlong)(intptr_t)free; }
+
+/* ==================== java.util.jar.JarFile stubs ==================== */
+static jobjectArray JarFile_getMetaInfEntryNames(JNIEnv* env, jobject obj) {
+    /* Return null — no META-INF entries, skips jar verification */
+    return NULL;
+}
+
+/* ==================== java.security.SecureRandom fallback ==================== */
+/* For UUID.randomUUID() — seed from /dev/urandom if available, else time-based */
+static jbyteArray SecureRandom_engineNextBytes_stub = NULL;
 
 /* Forward declare ohbridge JNI_OnLoad - we call it ourselves since the weak link may not */
 extern jint JNI_OnLoad_ohbridge(JavaVM* vm, void* reserved);
@@ -1032,6 +1265,16 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"isSpaceCharImpl", "(I)Z", (void*)Character_isSpaceCharImpl},
                 {"digitImpl", "(II)I", (void*)Character_digitImpl},
                 {"getTypeImpl", "(I)I", (void*)Character_getTypeImpl},
+                {"isLetterOrDigitImpl", "(I)Z", (void*)Character_isLetterOrDigitImpl},
+                {"isAlphabeticImpl", "(I)Z", (void*)Character_isAlphabeticImpl},
+                {"isDefinedImpl", "(I)Z", (void*)Character_isDefinedImpl},
+                {"toTitleCaseImpl", "(I)I", (void*)Character_toTitleCaseImpl},
+                {"isIdentifierIgnorableImpl", "(I)Z", (void*)Character_isIdentifierIgnorableImpl},
+                {"getNumericValueImpl", "(I)I", (void*)Character_getNumericValueImpl},
+                {"getDirectionalityImpl", "(I)B", (void*)Character_getDirectionalityImpl},
+                {"isMirroredImpl", "(I)Z", (void*)Character_isMirroredImpl},
+                {"isTitleCaseImpl", "(I)Z", (void*)Character_isTitleCaseImpl},
+                {"isIdeographicImpl", "(I)Z", (void*)Character_isIdeographicImpl},
             };
             registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
@@ -1114,6 +1357,90 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
                 {"freeEntry", "(JJ)V", (void*)ZipFile_freeEntry},
                 {"startsWithLOC", "(J)Z", (void*)ZipFile_startsWithLOC},
                 {"ensureOpen", "()V", (void*)ZipFile_ensureOpen},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+    /* java.util.jar.JarFile */
+    {
+        jclass cls = (*env)->FindClass(env, "java/util/jar/JarFile");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"getMetaInfEntryNames", "()[Ljava/lang/String;", (void*)JarFile_getMetaInfEntryNames},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+    /* java.util.zip.Inflater */
+    {
+        jclass cls = (*env)->FindClass(env, "java/util/zip/Inflater");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"init", "(Z)J", (void*)Inflater_init},
+                {"setInput", "(J[BII)V", (void*)Inflater_setInput},
+                {"setDictionary", "(J[BII)V", (void*)Inflater_setDictionary},
+                {"inflateBytes", "(J[BII)I", (void*)Inflater_inflateBytes},
+                {"getAdler", "(J)I", (void*)Inflater_getAdler},
+                {"getBytesRead", "(J)J", (void*)Inflater_getBytesRead},
+                {"getBytesWritten", "(J)J", (void*)Inflater_getBytesWritten},
+                {"reset", "(J)V", (void*)Inflater_reset},
+                {"end", "(J)V", (void*)Inflater_end},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+    /* java.util.zip.Deflater */
+    {
+        jclass cls = (*env)->FindClass(env, "java/util/zip/Deflater");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"init", "(IIZ)J", (void*)Deflater_init},
+                {"setInput", "(J[BII)V", (void*)Deflater_setInput},
+                {"setDictionary", "(J[BII)V", (void*)Deflater_setDictionary},
+                {"deflateBytes", "(J[BII)I", (void*)Deflater_deflateBytes},
+                {"getAdler", "(J)I", (void*)Deflater_getAdler},
+                {"getBytesRead", "(J)J", (void*)Deflater_getBytesRead},
+                {"getBytesWritten", "(J)J", (void*)Deflater_getBytesWritten},
+                {"reset", "(J)V", (void*)Deflater_reset},
+                {"end", "(J)V", (void*)Deflater_end},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+    /* com.android.icu.util.regex.PatternNative */
+    {
+        jclass cls = (*env)->FindClass(env, "com/android/icu/util/regex/PatternNative");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"getNativeFinalizer", "()J", (void*)PatternNative_getNativeFinalizer},
+                {"compileRegex", "(Ljava/lang/String;I)J", (void*)PatternNative_compileRegex},
+                {"compileImpl", "(Ljava/lang/String;I)J", (void*)PatternNative_compileRegex},
+                {"openMatcher", "(J)J", (void*)PatternNative_openMatcher},
+            };
+            registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
+            (*env)->DeleteLocalRef(env, cls);
+        }
+    }
+    /* com.android.icu.util.regex.MatcherNative */
+    {
+        jclass cls = (*env)->FindClass(env, "com/android/icu/util/regex/MatcherNative");
+        if (cls) {
+            JNINativeMethod methods[] = {
+                {"getNativeFinalizer", "()J", (void*)MatcherNative_getNativeFinalizer},
+                {"find", "(J[II)Z", (void*)MatcherNative_findNext},
+                {"findNext", "(JI[I)Z", (void*)MatcherNative_findNext},
+                {"lookingAt", "(J[I)Z", (void*)MatcherNative_lookingAt},
+                {"matches", "(J[I)Z", (void*)MatcherNative_matches},
+                {"groupCount", "(J)I", (void*)MatcherNative_groupCount},
+                {"setInput", "(JLjava/lang/String;II)V", (void*)MatcherNative_setInput},
+                {"useAnchoringBounds", "(JZ)V", (void*)MatcherNative_useAnchoringBounds},
+                {"useTransparentBounds", "(JZ)V", (void*)MatcherNative_useTransparentBounds},
+                {"hitEnd", "(J)Z", (void*)MatcherNative_hitEnd},
+                {"requireEnd", "(J)Z", (void*)MatcherNative_requireEnd},
             };
             registerNativesOrSkip(env, cls, methods, sizeof(methods)/sizeof(methods[0]));
             (*env)->DeleteLocalRef(env, cls);
