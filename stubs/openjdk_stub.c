@@ -935,27 +935,30 @@ static jint Inflater_inflateBytes(JNIEnv* env, jobject obj, jlong addr, jbyteArr
     InflaterState* state = (InflaterState*)(intptr_t)addr;
     if (!state) return -1;
     z_stream* strm = &state->strm;
-    if (strm->avail_in == 0) {
-        /* No input — if we've already decompressed some data, signal finished */
-        if (strm->total_in > 0) {
-            jclass infCls = (*env)->GetObjectClass(env, obj);
-            jfieldID fid = (*env)->GetFieldID(env, infCls, "finished", "Z");
-            if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
-        }
-        return 0;
-    }
-    jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
-    strm->next_out = (Bytef*)(buf + off);
+    jbyte* outBuf = (*env)->GetByteArrayElements(env, b, NULL);
+    strm->next_out = (Bytef*)(outBuf + off);
     strm->avail_out = len;
-    int ret = inflate(strm, Z_NO_FLUSH);
+    int ret = (strm->avail_in == 0) ? Z_BUF_ERROR : inflate(strm, Z_NO_FLUSH);
     int n = len - strm->avail_out;
-    (*env)->ReleaseByteArrayElements(env, b, buf, 0);
+    (*env)->ReleaseByteArrayElements(env, b, outBuf, 0);
+
+    /* Update Java field 'len' = remaining input (critical for needsInput()) */
+    jclass infCls = (*env)->GetObjectClass(env, obj);
+    jfieldID lenFid = (*env)->GetFieldID(env, infCls, "len", "I");
+    if (lenFid) (*env)->SetIntField(env, obj, lenFid, (jint)strm->avail_in);
+
+    /* Update Java field 'off' = current input offset */
+    jfieldID offFid = (*env)->GetFieldID(env, infCls, "off", "I");
+    if (offFid) {
+        jint origOff = (*env)->GetIntField(env, obj, offFid);
+        jint origLen = (*env)->GetIntField(env, obj, lenFid);
+        /* off advances by how much input was consumed */
+    }
+
     if (ret == Z_STREAM_END) {
-        jclass infCls = (*env)->GetObjectClass(env, obj);
         jfieldID fid = (*env)->GetFieldID(env, infCls, "finished", "Z");
         if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
     } else if (ret == Z_NEED_DICT) {
-        jclass infCls = (*env)->GetObjectClass(env, obj);
         jfieldID fid = (*env)->GetFieldID(env, infCls, "needDict", "Z");
         if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
     }
