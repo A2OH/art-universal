@@ -899,93 +899,132 @@ static jint Typeface_nativeGetWeight(JNIEnv* env, jclass cls, jlong nativePtr) {
 static void Typeface_nativeRegisterGenericFamily(JNIEnv* env, jclass cls, jstring str, jlong nativePtr) {}
 
 /* ==================== java.util.zip.Inflater ==================== */
-/* Wrapper to track input buffer alongside z_stream (can't use opaque — zlib uses it) */
-typedef struct {
-    z_stream strm;
-    Bytef* input_buf;  /* allocated input buffer to free later */
-} InflaterState;
+/* Matches AOSP libcore/ojluni/src/main/native/Inflater.c exactly.
+ * Key design: inflateBytes reads input from Java fields (buf/off/len)
+ * every call. No separate setInput native needed — Java setInput()
+ * stores into fields, native reads them. */
+
+static jfieldID inflater_needDictID;
+static jfieldID inflater_finishedID;
+static jfieldID inflater_bufID, inflater_offID, inflater_lenID;
+static int inflater_ids_inited = 0;
+
+static void Inflater_initIDs(JNIEnv* env) {
+    if (inflater_ids_inited) return;
+    jclass cls = (*env)->FindClass(env, "java/util/zip/Inflater");
+    if (!cls) return;
+    inflater_needDictID = (*env)->GetFieldID(env, cls, "needDict", "Z");
+    inflater_finishedID = (*env)->GetFieldID(env, cls, "finished", "Z");
+    inflater_bufID = (*env)->GetFieldID(env, cls, "buf", "[B");
+    inflater_offID = (*env)->GetFieldID(env, cls, "off", "I");
+    inflater_lenID = (*env)->GetFieldID(env, cls, "len", "I");
+    if (!inflater_bufID || !inflater_offID || !inflater_lenID || !inflater_finishedID || !inflater_needDictID) {
+        fprintf(stderr, "[Inflater] FATAL: field IDs not found! buf=%p off=%p len=%p fin=%p dict=%p\n",
+            (void*)inflater_bufID, (void*)inflater_offID, (void*)inflater_lenID,
+            (void*)inflater_finishedID, (void*)inflater_needDictID);
+        (*env)->ExceptionClear(env);
+    } else {
+        fprintf(stderr, "[Inflater] Field IDs initialized OK\n");
+    }
+    inflater_ids_inited = 1;
+}
 
 static jlong Inflater_init(JNIEnv* env, jclass cls, jboolean nowrap) {
-    InflaterState* state = (InflaterState*)calloc(1, sizeof(InflaterState));
-    if (!state) return 0;
-    int ret = inflateInit2(&state->strm, nowrap ? -MAX_WBITS : MAX_WBITS);
-    if (ret != Z_OK) { free(state); return 0; }
-    return (jlong)(intptr_t)state;
+    z_stream* strm = (z_stream*)calloc(1, sizeof(z_stream));
+    if (!strm) return 0;
+    int ret = inflateInit2(strm, nowrap ? -MAX_WBITS : MAX_WBITS);
+    if (ret != Z_OK) { free(strm); return 0; }
+    Inflater_initIDs(env);
+    return (jlong)(intptr_t)strm;
 }
 static void Inflater_setDictionary(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    if (!state) return;
-    jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
-    inflateSetDictionary(&state->strm, (Bytef*)(buf + off), len);
-    (*env)->ReleaseByteArrayElements(env, b, buf, JNI_ABORT);
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm) return;
+    jbyte* buf = (*env)->GetPrimitiveArrayCritical(env, b, 0);
+    if (!buf) return;
+    inflateSetDictionary(strm, (Bytef*)(buf + off), len);
+    (*env)->ReleasePrimitiveArrayCritical(env, b, buf, 0);
 }
+/* setInput is Java-only — stores into buf/off/len fields. No native needed.
+   But we register a no-op to prevent UnsatisfiedLinkError. */
 static void Inflater_setInput(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    if (!state || !b) return;
-    if (state->input_buf) { free(state->input_buf); state->input_buf = NULL; }
-    jbyte* src = (*env)->GetByteArrayElements(env, b, NULL);
-    Bytef* buf = (Bytef*)malloc(len);
-    memcpy(buf, src + off, len);
-    (*env)->ReleaseByteArrayElements(env, b, src, JNI_ABORT);
-    state->strm.next_in = buf;
-    state->strm.avail_in = len;
-    state->input_buf = buf;
+    /* No-op: AOSP's setInput is pure Java. This stub exists only for
+       ART versions that declare it as native. */
 }
 static jint Inflater_inflateBytes(JNIEnv* env, jobject obj, jlong addr, jbyteArray b, jint off, jint len) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    if (!state) return -1;
-    z_stream* strm = &state->strm;
-    jbyte* outBuf = (*env)->GetByteArrayElements(env, b, NULL);
-    strm->next_out = (Bytef*)(outBuf + off);
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (!strm) return -1;
+    Inflater_initIDs(env);
+    }
+
+    /* Read input from Java fields (this is the AOSP way) */
+    jbyteArray this_buf = (jbyteArray)(*env)->GetObjectField(env, obj, inflater_bufID);
+    jint this_off = (*env)->GetIntField(env, obj, inflater_offID);
+    jint this_len = (*env)->GetIntField(env, obj, inflater_lenID);
+
+    jbyte* in_buf = NULL;
+    if (this_buf != NULL) {
+        in_buf = (*env)->GetPrimitiveArrayCritical(env, this_buf, 0);
+        if (in_buf == NULL) return 0;
+    }
+    jbyte* out_buf = (*env)->GetPrimitiveArrayCritical(env, b, 0);
+    if (out_buf == NULL) {
+        if (in_buf) (*env)->ReleasePrimitiveArrayCritical(env, this_buf, in_buf, 0);
+        return 0;
+    }
+
+    strm->next_in  = (in_buf != NULL) ? (Bytef*)(in_buf + this_off) : NULL;
+    strm->avail_in  = this_len;
+    strm->next_out = (Bytef*)(out_buf + off);
     strm->avail_out = len;
-    int ret = (strm->avail_in == 0) ? Z_BUF_ERROR : inflate(strm, Z_NO_FLUSH);
-    int n = len - strm->avail_out;
-    (*env)->ReleaseByteArrayElements(env, b, outBuf, 0);
 
-    /* Update Java field 'len' = remaining input (critical for needsInput()) */
-    jclass infCls = (*env)->GetObjectClass(env, obj);
-    jfieldID lenFid = (*env)->GetFieldID(env, infCls, "len", "I");
-    if (lenFid) (*env)->SetIntField(env, obj, lenFid, (jint)strm->avail_in);
+    int ret = inflate(strm, Z_PARTIAL_FLUSH);
 
-    /* Update Java field 'off' = current input offset */
-    jfieldID offFid = (*env)->GetFieldID(env, infCls, "off", "I");
-    if (offFid) {
-        jint origOff = (*env)->GetIntField(env, obj, offFid);
-        jint origLen = (*env)->GetIntField(env, obj, lenFid);
-        /* off advances by how much input was consumed */
+    (*env)->ReleasePrimitiveArrayCritical(env, b, out_buf, 0);
+    if (in_buf) (*env)->ReleasePrimitiveArrayCritical(env, this_buf, in_buf, 0);
+
+    switch (ret) {
+    case Z_STREAM_END:
+        (*env)->SetBooleanField(env, obj, inflater_finishedID, JNI_TRUE);
+        /* fall through */
+    case Z_OK:
+        this_off += this_len - strm->avail_in;
+        (*env)->SetIntField(env, obj, inflater_offID, this_off);
+        (*env)->SetIntField(env, obj, inflater_lenID, (jint)strm->avail_in);
+        return (jint)(len - strm->avail_out);
+    case Z_NEED_DICT:
+        (*env)->SetBooleanField(env, obj, inflater_needDictID, JNI_TRUE);
+        this_off += this_len - strm->avail_in;
+        (*env)->SetIntField(env, obj, inflater_offID, this_off);
+        (*env)->SetIntField(env, obj, inflater_lenID, (jint)strm->avail_in);
+        return 0;
+    case Z_BUF_ERROR:
+        return 0;
+    default:
+        return 0;
     }
-
-    if (ret == Z_STREAM_END) {
-        jfieldID fid = (*env)->GetFieldID(env, infCls, "finished", "Z");
-        if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
-    } else if (ret == Z_NEED_DICT) {
-        jfieldID fid = (*env)->GetFieldID(env, infCls, "needDict", "Z");
-        if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
-    }
-    return n;
 }
 static jint Inflater_getAdler(JNIEnv* env, jclass cls, jlong addr) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    return state ? (jint)state->strm.adler : 0;
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jint)strm->adler : 0;
 }
 static void Inflater_reset(JNIEnv* env, jclass cls, jlong addr) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    if (state) inflateReset(&state->strm);
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (strm) inflateReset(strm);
 }
 static jlong Inflater_getBytesRead(JNIEnv* env, jclass cls, jlong addr) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    return state ? (jlong)state->strm.total_in : 0;
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jlong)strm->total_in : 0;
 }
 static jlong Inflater_getBytesWritten(JNIEnv* env, jclass cls, jlong addr) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    return state ? (jlong)state->strm.total_out : 0;
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    return strm ? (jlong)strm->total_out : 0;
 }
 static void Inflater_end(JNIEnv* env, jclass cls, jlong addr) {
-    InflaterState* state = (InflaterState*)(intptr_t)addr;
-    if (state) {
-        if (state->input_buf) free(state->input_buf);
-        inflateEnd(&state->strm);
-        free(state);
+    z_stream* strm = (z_stream*)(intptr_t)addr;
+    if (strm) {
+        inflateEnd(strm);
+        free(strm);
     }
 }
 
