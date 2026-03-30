@@ -899,30 +899,57 @@ static jint Typeface_nativeGetWeight(JNIEnv* env, jclass cls, jlong nativePtr) {
 static void Typeface_nativeRegisterGenericFamily(JNIEnv* env, jclass cls, jstring str, jlong nativePtr) {}
 
 /* ==================== java.util.zip.Inflater ==================== */
+/* Wrapper to track input buffer alongside z_stream (can't use opaque — zlib uses it) */
+typedef struct {
+    z_stream strm;
+    Bytef* input_buf;  /* allocated input buffer to free later */
+} InflaterState;
+
 static jlong Inflater_init(JNIEnv* env, jclass cls, jboolean nowrap) {
-    z_stream* strm = (z_stream*)calloc(1, sizeof(z_stream));
-    if (!strm) return 0;
-    int ret = inflateInit2(strm, nowrap ? -MAX_WBITS : MAX_WBITS);
-    if (ret != Z_OK) { free(strm); return 0; }
-    return (jlong)(intptr_t)strm;
+    InflaterState* state = (InflaterState*)calloc(1, sizeof(InflaterState));
+    if (!state) return 0;
+    int ret = inflateInit2(&state->strm, nowrap ? -MAX_WBITS : MAX_WBITS);
+    if (ret != Z_OK) { free(state); return 0; }
+    return (jlong)(intptr_t)state;
 }
 static void Inflater_setDictionary(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    if (!strm) return;
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    if (!state) return;
     jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
-    inflateSetDictionary(strm, (Bytef*)(buf + off), len);
+    inflateSetDictionary(&state->strm, (Bytef*)(buf + off), len);
     (*env)->ReleaseByteArrayElements(env, b, buf, JNI_ABORT);
 }
+static void Inflater_setInput(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    if (!state || !b) return;
+    if (state->input_buf) { free(state->input_buf); state->input_buf = NULL; }
+    jbyte* src = (*env)->GetByteArrayElements(env, b, NULL);
+    Bytef* buf = (Bytef*)malloc(len);
+    memcpy(buf, src + off, len);
+    (*env)->ReleaseByteArrayElements(env, b, src, JNI_ABORT);
+    state->strm.next_in = buf;
+    state->strm.avail_in = len;
+    state->input_buf = buf;
+}
 static jint Inflater_inflateBytes(JNIEnv* env, jobject obj, jlong addr, jbyteArray b, jint off, jint len) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    if (!strm) return -1;
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    if (!state) return -1;
+    z_stream* strm = &state->strm;
+    if (strm->avail_in == 0) {
+        /* No input — if we've already decompressed some data, signal finished */
+        if (strm->total_in > 0) {
+            jclass infCls = (*env)->GetObjectClass(env, obj);
+            jfieldID fid = (*env)->GetFieldID(env, infCls, "finished", "Z");
+            if (fid) (*env)->SetBooleanField(env, obj, fid, JNI_TRUE);
+        }
+        return 0;
+    }
     jbyte* buf = (*env)->GetByteArrayElements(env, b, NULL);
     strm->next_out = (Bytef*)(buf + off);
     strm->avail_out = len;
-    int ret = inflate(strm, Z_PARTIAL_FLUSH);
+    int ret = inflate(strm, Z_NO_FLUSH);
     int n = len - strm->avail_out;
     (*env)->ReleaseByteArrayElements(env, b, buf, 0);
-    /* Update Java fields: finished, needDict */
     if (ret == Z_STREAM_END) {
         jclass infCls = (*env)->GetObjectClass(env, obj);
         jfieldID fid = (*env)->GetFieldID(env, infCls, "finished", "Z");
@@ -934,42 +961,28 @@ static jint Inflater_inflateBytes(JNIEnv* env, jobject obj, jlong addr, jbyteArr
     }
     return n;
 }
-static void Inflater_setInput(JNIEnv* env, jclass cls, jlong addr, jbyteArray b, jint off, jint len) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    if (!strm || !b) return;
-    /* Free previous input buffer if any (stored in opaque) */
-    if (strm->opaque) { free(strm->opaque); strm->opaque = NULL; }
-    /* Copy input data to persistent buffer */
-    jbyte* src = (*env)->GetByteArrayElements(env, b, NULL);
-    Bytef* buf = (Bytef*)malloc(len);
-    memcpy(buf, src + off, len);
-    (*env)->ReleaseByteArrayElements(env, b, src, JNI_ABORT);
-    strm->next_in = buf;
-    strm->avail_in = len;
-    strm->opaque = buf; /* remember for free */
-}
 static jint Inflater_getAdler(JNIEnv* env, jclass cls, jlong addr) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    return strm ? (jint)strm->adler : 0;
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    return state ? (jint)state->strm.adler : 0;
 }
 static void Inflater_reset(JNIEnv* env, jclass cls, jlong addr) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    if (strm) inflateReset(strm);
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    if (state) inflateReset(&state->strm);
 }
 static jlong Inflater_getBytesRead(JNIEnv* env, jclass cls, jlong addr) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    return strm ? (jlong)strm->total_in : 0;
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    return state ? (jlong)state->strm.total_in : 0;
 }
 static jlong Inflater_getBytesWritten(JNIEnv* env, jclass cls, jlong addr) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    return strm ? (jlong)strm->total_out : 0;
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    return state ? (jlong)state->strm.total_out : 0;
 }
 static void Inflater_end(JNIEnv* env, jclass cls, jlong addr) {
-    z_stream* strm = (z_stream*)(intptr_t)addr;
-    if (strm) {
-        if (strm->opaque) free(strm->opaque);
-        inflateEnd(strm);
-        free(strm);
+    InflaterState* state = (InflaterState*)(intptr_t)addr;
+    if (state) {
+        if (state->input_buf) free(state->input_buf);
+        inflateEnd(&state->strm);
+        free(state);
     }
 }
 
